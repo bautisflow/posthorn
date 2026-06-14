@@ -128,6 +128,8 @@ curl -X POST https://posthorn.yourdomain.com/api/transactional \
   }'
 ```
 
+Calling from Python or JavaScript with no dependencies: [docs/calling-posthorn.md](./docs/calling-posthorn.md).
+
 Full walkthrough: [posthorn.dev/recipes/cloudflare-worker](https://posthorn.dev/recipes/cloudflare-worker/).
 
 ## SMTP listener (Ghost / Gitea / Mastodon / Authentik)
@@ -218,6 +220,10 @@ cd posthorn/core
 go build -o /tmp/posthorn ./cmd/posthorn
 /tmp/posthorn version
 ```
+
+## Ecosystem
+
+Posthorn ships no official client SDK; the HTTP API is the supported integration surface and needs no client library. Community-built clients and tools are listed in [docs/ecosystem.md](./docs/ecosystem.md) and are third-party, not endorsed by Posthorn.
 
 ## Contributing
 
