@@ -101,8 +101,10 @@ form-encoded body required (application/x-www-form-urlencoded or multipart/form-
 Or, for a body that couldn't be parsed:
 
 ```text
-parse form: <underlying error from net/http>
+malformed request body
 ```
+
+The parser's internal error is not echoed to the client (it's logged server-side as `body_parse_failed`). API-mode endpoints additionally return the specific shape violation for JSON that parses but isn't a flat object (e.g. `nested objects are not supported`). In form mode, if `redirect_error` is configured and the request prefers HTML (no `Accept: application/json`), a malformed body redirects (303) to the error page — the same content-negotiated behavior as a validation failure — rather than returning the 400 body.
 
 Common causes:
 

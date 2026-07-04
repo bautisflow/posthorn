@@ -171,7 +171,7 @@ A short catalog of the events you'll actually grep for. Full schema for each is 
 | Why did this submission fail? | `submission_failed` (`error`, `form` or `form_fields`) |
 | Did the retry help? | `send_retry_scheduled` → `send_retry_succeeded` (or `send_retry_failed` + `submission_failed`) |
 | Is the rate limiter firing? | `rate_limited` (with `client_ip` in form mode) |
-| Is the honeypot catching bots? | `spam_blocked` (with `kind: "honeypot"` or `kind: "origin"`) |
+| Is the honeypot catching bots? | `spam_blocked` (with `kind: "honeypot"` or `kind: "origin"`); CSRF rejections log as `csrf_rejected` and increment `posthorn_spam_blocked_total{kind="csrf"}` |
 | Are any callers misusing their API key? | `auth_failed` (the rejected key is *not* logged — only that auth failed) |
 | Is the idempotency cache doing its job? | `idempotent_replay` (cached hit) vs `idempotent_conflict` (collision in flight) |
 | Did the SMTP listener accept this session? | `smtp_session_open` → `smtp_tls_established` → `smtp_auth_ok` → `smtp_submission_sent` |

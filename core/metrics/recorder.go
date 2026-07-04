@@ -60,7 +60,7 @@ func NewRecorder(reg *Registry) *Recorder {
 		),
 		spamBlocked: NewCounter(
 			"posthorn_spam_blocked_total",
-			"Form-mode submissions silent-rejected by spam defenses (honeypot, origin).",
+			"Form-mode submissions rejected by spam defenses (honeypot/origin silent-200; csrf 403).",
 			[]string{"endpoint", "kind"},
 		),
 		validationFailed: NewCounter(

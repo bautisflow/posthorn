@@ -113,17 +113,22 @@ func runServe(args []string) error {
 		return fmt.Errorf("build router: %w", err)
 	}
 
-	// ReadTimeout/WriteTimeout sit above the handler's 10s request
-	// timeout so a slow-body sender or slow-reading client can't hold a
-	// connection past the bound the handler already enforces (#42).
-	// WriteTimeout starts when the request headers are read, so it must
-	// cover handler time plus the response write.
+	// Server-level timeouts bound slow-body senders and slow-reading
+	// clients so they can't hold a connection indefinitely (#42).
+	// WriteTimeout's deadline is set when the request headers are read,
+	// so it must cover the WHOLE remaining request: body read (bounded
+	// by ReadTimeout) plus handler execution (bounded by the handler's
+	// own 10s requestTimeout, which includes retry backoff). It must
+	// therefore exceed ReadTimeout + requestTimeout, or a legitimate
+	// slow upload followed by a provider retry would have its response
+	// truncated after the mail was already sent — and form mode has no
+	// idempotency, so the user's resubmit would double-send.
 	server := &http.Server{
 		Addr:              *listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		WriteTimeout:      30 * time.Second, // > ReadTimeout (15s) + handler requestTimeout (10s)
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    64 << 10, // 64 KB; explicit, was stdlib 1MB default
 	}
