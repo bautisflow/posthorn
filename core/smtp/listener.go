@@ -14,7 +14,17 @@ import (
 
 	"github.com/craigmccaskill/posthorn/log"
 	"github.com/craigmccaskill/posthorn/metrics"
+	"github.com/craigmccaskill/posthorn/ratelimit"
 	"github.com/craigmccaskill/posthorn/transport"
+)
+
+// AUTH brute-force budget — token bucket per remote IP, mirroring the
+// HTTP api-mode defense (gateway's defaultAuthFailureBudget). Each
+// failed AUTH consumes a token; an exhausted bucket gets 421 and the
+// connection closes. Vars (not consts) so tests can override; #50.
+var (
+	authFailureBudget   = 10
+	authFailureInterval = time.Minute
 )
 
 // Listener is the inbound SMTP ingress. Owns a TCP listener and a
@@ -31,6 +41,15 @@ type Listener struct {
 	listener net.Listener
 	stopped  chan struct{}
 	wg       sync.WaitGroup
+
+	// authFail is the per-IP AUTH brute-force limiter (#50). Never nil.
+	authFail *ratelimit.Limiter
+
+	// Connection accounting (#50): global + per-IP concurrent caps,
+	// enforced in the accept loop before a session goroutine spawns.
+	connMu      sync.Mutex
+	activeConns int
+	perIPConns  map[string]int
 }
 
 // New constructs a Listener from a validated config and a transport
@@ -46,15 +65,65 @@ func New(cfg ListenerConfig, tp transport.Transport, maxBodySize int64, logger *
 	if err != nil {
 		return nil, err
 	}
+	authFail, err := ratelimit.New(authFailureBudget, authFailureInterval, 0)
+	if err != nil {
+		return nil, fmt.Errorf("smtp_listener: auth-failure limiter: %w", err)
+	}
 	return &Listener{
-		cfg:       cfg,
-		transport: tp,
-		maxBody:   maxBodySize,
-		tlsConfig: tlsCfg,
-		logger:    logger,
-		recorder:  recorder,
-		stopped:   make(chan struct{}),
+		cfg:        cfg,
+		transport:  tp,
+		maxBody:    maxBodySize,
+		tlsConfig:  tlsCfg,
+		logger:     logger,
+		recorder:   recorder,
+		stopped:    make(chan struct{}),
+		authFail:   authFail,
+		perIPConns: make(map[string]int),
 	}, nil
+}
+
+// acquireConnSlot reserves a connection slot for remoteIP, enforcing
+// the global and per-IP caps. Returns false when either cap is hit.
+func (l *Listener) acquireConnSlot(remoteIP string) bool {
+	l.connMu.Lock()
+	defer l.connMu.Unlock()
+	if l.activeConns >= l.cfg.EffectiveMaxConnections() {
+		return false
+	}
+	if l.perIPConns[remoteIP] >= l.cfg.EffectiveMaxConnectionsPerIP() {
+		return false
+	}
+	l.activeConns++
+	l.perIPConns[remoteIP]++
+	return true
+}
+
+// releaseConnSlot returns a slot reserved by acquireConnSlot.
+func (l *Listener) releaseConnSlot(remoteIP string) {
+	l.connMu.Lock()
+	defer l.connMu.Unlock()
+	l.activeConns--
+	if n := l.perIPConns[remoteIP] - 1; n > 0 {
+		l.perIPConns[remoteIP] = n
+	} else {
+		delete(l.perIPConns, remoteIP)
+	}
+}
+
+// authFailureExceeded records one AUTH failure for remoteIP and reports
+// whether the budget is now exhausted (#50). Successful auths never
+// consume budget — mirrors the HTTP api-mode brute-force defense.
+func (l *Listener) authFailureExceeded(remoteIP string) bool {
+	return !l.authFail.Allow(remoteIP)
+}
+
+// remoteIPOf extracts the host part of a connection's remote address.
+func remoteIPOf(conn net.Conn) string {
+	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+	if err != nil {
+		return conn.RemoteAddr().String()
+	}
+	return host
 }
 
 // buildTLSConfig assembles the *tls.Config used for STARTTLS and (if
@@ -159,6 +228,25 @@ func (l *Listener) Stop(ctx context.Context) error {
 // machine. Closes the connection on return.
 func (l *Listener) handleConnection(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
+
+	// #50: enforce the global and per-IP concurrent-connection caps
+	// before any protocol work. Refused connections get a one-line 421
+	// so well-behaved clients back off and retry.
+	remoteIP := remoteIPOf(conn)
+	if !l.acquireConnSlot(remoteIP) {
+		// Bound the refusal write: a zero-window client under exactly the
+		// flood this cap defends against must not block this goroutine
+		// (it is counted in l.wg, so a hang would stall Stop's drain).
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_, _ = conn.Write([]byte("421 4.7.0 Too many connections, try again later\r\n"))
+		l.logger.Info("smtp_connection_refused",
+			slog.String("remote_ip", remoteIP),
+			slog.String("reason", "connection_cap"),
+		)
+		return
+	}
+	defer l.releaseConnSlot(remoteIP)
+
 	sess := newSession(conn, l)
 	sess.run()
 }

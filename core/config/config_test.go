@@ -223,6 +223,93 @@ api_key = "test-key"
 	}
 }
 
+// --- Validation: smtp_listener auth_required="none" bind check (#41) ---
+
+// listenerAuthNoneTOML builds an smtp_listener block with the given
+// listen address and extra lines, appended to a minimal valid endpoint.
+func listenerAuthNoneTOML(listen, extra string) string {
+	return minimalTOML + `
+[smtp_listener]
+listen          = "` + listen + `"
+auth_required   = "none"
+require_tls     = false
+allowed_senders = ["*@example.com"]
+` + extra + `
+[smtp_listener.transport]
+type = "postmark"
+
+[smtp_listener.transport.settings]
+api_key = "test-key"
+`
+}
+
+func TestValidate_SMTPAuthNone_PublicBindRefused(t *testing.T) {
+	for _, listen := range []string{":2525", "0.0.0.0:2525", "[::]:2525", "203.0.113.5:2525", "smtp.example.com:2525"} {
+		t.Run(listen, func(t *testing.T) {
+			_, err := loadString(t, listenerAuthNoneTOML(listen, ""))
+			if err == nil {
+				t.Fatalf("auth_required=none with listen %q should be refused", listen)
+			}
+			if !strings.Contains(err.Error(), "trusted_network") {
+				t.Errorf("error should name the trusted_network override: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidate_SMTPAuthNone_PrivateBindAccepted(t *testing.T) {
+	for _, listen := range []string{"127.0.0.1:2525", "localhost:2525", "10.1.2.3:2525", "192.168.1.5:2525", "[::1]:2525"} {
+		t.Run(listen, func(t *testing.T) {
+			if _, err := loadString(t, listenerAuthNoneTOML(listen, "")); err != nil {
+				t.Errorf("auth_required=none with private listen %q should validate, got: %v", listen, err)
+			}
+		})
+	}
+}
+
+func TestValidate_SMTPAuthNone_TrustedNetworkOverride(t *testing.T) {
+	// The explicit ack clears the public-bind refusal — the Docker
+	// pattern where 0.0.0.0 inside the container is fronted by the
+	// container network.
+	if _, err := loadString(t, listenerAuthNoneTOML(":2525", "trusted_network = true\n")); err != nil {
+		t.Errorf("trusted_network=true should clear the refusal, got: %v", err)
+	}
+}
+
+func TestValidate_SMTPAuthDefault_PublicBindAccepted(t *testing.T) {
+	// The bind check applies only to auth_required="none"; an
+	// authenticated listener may bind anywhere.
+	c := minimalTOML + `
+[smtp_listener]
+listen          = ":2525"
+allowed_senders = ["*@example.com"]
+
+[[smtp_listener.smtp_users]]
+username = "u"
+password = "p"
+
+[smtp_listener.transport]
+type = "postmark"
+
+[smtp_listener.transport.settings]
+api_key = "test-key"
+`
+	if _, err := loadString(t, c); err != nil {
+		t.Errorf("authenticated listener on :2525 should validate, got: %v", err)
+	}
+}
+
+func TestValidate_SMTPListener_NegativeConnCaps(t *testing.T) {
+	c := listenerAuthNoneTOML("127.0.0.1:2525", "max_connections = -1\n")
+	if _, err := loadString(t, c); err == nil || !strings.Contains(err.Error(), "max_connections") {
+		t.Errorf("negative max_connections should be refused: %v", err)
+	}
+	c = listenerAuthNoneTOML("127.0.0.1:2525", "max_connections_per_ip = -1\n")
+	if _, err := loadString(t, c); err == nil || !strings.Contains(err.Error(), "max_connections_per_ip") {
+		t.Errorf("negative max_connections_per_ip should be refused: %v", err)
+	}
+}
+
 func TestValidate_DuplicatePath(t *testing.T) {
 	dup := minimalTOML + minimalTOML
 	_, err := loadString(t, dup)

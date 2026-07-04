@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`auth_required = "none"` on a public bind is now refused at config-parse time (#41).** An SMTP listener with `auth_required = "none"` whose `listen` address is not verifiably loopback/private (e.g. `:2525`, `0.0.0.0:2525`, a public IP, or an unresolvable hostname) is a startup error. Set `trusted_network = true` to assert the listener is reachable only from a trusted network — a Docker bridge with no `ports:` exposure, a VPN, or a firewall. **Migration:** deployments built from the pre-existing Ghost / Gitea / internal-relay recipes used `auth_required = "none"` with `listen = ":2525"` and must add `trusted_network = true` (the updated recipes include it). This closes the open-relay footgun where the sender allowlist was the only gate on an unauthenticated public listener.
+
+### Added
+
+- **SMTP listener brute-force and resource hardening (#50).** Per-remote-IP AUTH-failure budget (10 failures/minute; further attempts get `421` and the connection closes; successful auths never consume budget). Global (`max_connections`, default 100) and per-IP (`max_connections_per_ip`, default 16) concurrent-connection caps; over-cap connections get a `421` before any protocol work.
+
 ### Fixed
 
 - An `[smtp_listener]`-only config (no `[[endpoints]]`) is now accepted — the config validator required at least one HTTP endpoint, breaking the documented Ghost and Gitea recipes and every SMTP-listener-only deployment. `posthorn validate` output now names the listener so a listener-only config doesn't report a bare "0 endpoint(s)". ([#37](https://github.com/craigmccaskill/posthorn/issues/37))

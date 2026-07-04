@@ -212,6 +212,16 @@ Optional inbound SMTP ingress. When this block is present, `posthorn serve` star
 |---|---|---|---|---|
 | `max_message_size` | string | no | `"1MB"` | Maximum `DATA` blob size. Format matches `max_body_size`. Exceeding returns SMTP `552 5.3.4`. |
 | `idle_timeout` | duration | no | `"60s"` | Connection idle timeout. |
+| `max_connections` | int | no | `100` | Global concurrent-connection cap. Excess connections get `421` and close immediately. |
+| `max_connections_per_ip` | int | no | `16` | Per-remote-IP concurrent-connection cap. Same `421` behavior. |
+
+### Trust
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `trusted_network` | bool | see description | `false` | Required when `auth_required = "none"` and the bind address isn't verifiably loopback/private (e.g. `:2525` inside Docker). Your explicit assertion that the network the listener sits on is the trust boundary — a firewall, VPN, or Docker network with no `ports:` exposure. Without it, that combination is a config-parse error. |
+
+AUTH brute-force defense is built in and not configurable: 10 failed AUTH attempts per remote IP per minute, then `421` and the connection closes. Successful auths never consume the budget.
 
 ### Outbound transport
 

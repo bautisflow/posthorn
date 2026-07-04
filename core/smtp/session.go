@@ -103,7 +103,11 @@ func (s *session) run() {
 				continue
 			}
 		case "AUTH":
-			s.handleAUTH(arg)
+			if s.handleAUTH(arg) {
+				// Brute-force budget exhausted (#50); 421 already sent.
+				s.logger.Info("smtp_session_close", slog.String("reason", "auth_rate_limited"))
+				return
+			}
 		case "MAIL":
 			s.handleMAIL(arg)
 		case "RCPT":
@@ -223,20 +227,23 @@ func (s *session) handleSTARTTLS() bool {
 	return true
 }
 
-func (s *session) handleAUTH(arg string) {
+// handleAUTH processes an AUTH command. Returns true when the session
+// must close because the caller's AUTH-failure budget is exhausted
+// (#50) — the 421 reply has already been written.
+func (s *session) handleAUTH(arg string) (closeSession bool) {
 	if s.l.cfg.RequireTLS && !s.tlsActive {
 		_ = s.writeReply(530, "5.7.0 Must issue STARTTLS first")
-		return
+		return false
 	}
 	if !s.canAdvertiseAuth() {
 		_ = s.writeReply(502, "5.5.1 AUTH not supported")
-		return
+		return false
 	}
 	// Accept only AUTH PLAIN for v1.0.
 	const plainPrefix = "PLAIN"
 	if len(arg) < len(plainPrefix) || !strings.EqualFold(arg[:len(plainPrefix)], plainPrefix) {
 		_ = s.writeReply(504, "5.5.4 Auth mechanism not supported (PLAIN only)")
-		return
+		return false
 	}
 	credsB64 := strings.TrimSpace(arg[len(plainPrefix):])
 	if credsB64 == "" {
@@ -244,31 +251,47 @@ func (s *session) handleAUTH(arg string) {
 		// Next line should be the base64 credentials.
 		line, err := s.tp.ReadLine()
 		if err != nil {
-			return
+			return false
 		}
 		credsB64 = line
 	}
 	raw, err := base64.StdEncoding.DecodeString(credsB64)
 	if err != nil {
-		_ = s.writeReply(535, "5.7.8 Malformed AUTH credentials")
-		return
+		return s.authFailed("5.7.8 Malformed AUTH credentials", "")
 	}
 	// PLAIN format: \x00<user>\x00<pass>
 	parts := bytes.SplitN(raw, []byte{0}, 3)
 	if len(parts) != 3 {
-		_ = s.writeReply(535, "5.7.8 Malformed AUTH credentials")
-		return
+		return s.authFailed("5.7.8 Malformed AUTH credentials", "")
 	}
 	user := string(parts[1])
 	pass := string(parts[2])
 	if !s.verifyUser(user, pass) {
-		_ = s.writeReply(535, "5.7.8 Authentication failed")
-		s.logger.Info("smtp_auth_failed", slog.String("user", user))
-		return
+		return s.authFailed("5.7.8 Authentication failed", user)
 	}
 	s.authedUser = user
 	_ = s.writeReply(235, "2.7.0 Authentication successful")
 	s.logger.Info("smtp_auth_ok", slog.String("user", user))
+	return false
+}
+
+// authFailed replies to a failed AUTH attempt, counting it against the
+// per-IP brute-force budget (#50). Malformed credentials count the same
+// as wrong ones — scanners produce both. When the budget is exhausted
+// the reply is a 421 and the caller must close the session.
+func (s *session) authFailed(msg535, user string) (closeSession bool) {
+	if user != "" {
+		s.logger.Info("smtp_auth_failed", slog.String("user", user))
+	} else {
+		s.logger.Info("smtp_auth_failed", slog.String("reason", "malformed_credentials"))
+	}
+	if s.l.authFailureExceeded(remoteIPOf(s.conn)) {
+		_ = s.writeReply(421, "4.7.0 Too many failed AUTH attempts, closing connection")
+		s.logger.Info("smtp_auth_rate_limited")
+		return true
+	}
+	_ = s.writeReply(535, msg535)
+	return false
 }
 
 func (s *session) verifyUser(user, pass string) bool {

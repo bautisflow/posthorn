@@ -740,10 +740,6 @@ func TestSMTP_AuthNone_HappyPath_DeliversMessage(t *testing.T) {
 	}
 }
 
-// TestSMTP_AuthNone_SenderAllowlist_StillEnforced confirms the open-relay
-// prevention layer survives even when auth is disabled. AllowedSenders
-// is the only thing standing between the listener and a true open relay
-// in this mode, so the test is load-bearing.
 // --- FR19-22 retry policy on the SMTP path (issue #59) ---
 
 // smtpDataFlow drives EHLO/AUTH/MAIL/RCPT/DATA against the fixture and
@@ -802,6 +798,170 @@ func TestSMTP_TerminalUpstream_NoRetry_451(t *testing.T) {
 	}
 }
 
+// --- #50: AUTH brute-force lockout + connection caps ---
+
+func TestSMTP_AuthBruteForce_LockedOutAfterBudget(t *testing.T) {
+	// Shrink the budget so the test doesn't need 10 failures. Each
+	// failed AUTH consumes one token; the attempt that finds the
+	// bucket empty gets 421 and the session closes.
+	oldBudget := authFailureBudget
+	authFailureBudget = 2
+	t.Cleanup(func() { authFailureBudget = oldBudget })
+
+	f := startListener(t, baseTestConfig())
+	tp := f.dial()
+	_ = tp.PrintfLine("EHLO client.test")
+	expectMultiline(t, tp, 250)
+
+	// Failures 1 and 2 consume the budget and get the normal 535.
+	for i := 0; i < 2; i++ {
+		_ = tp.PrintfLine("AUTH PLAIN %s", authPlainCreds("user", "wrong"))
+		code, _ := expectCode(t, tp)
+		if code != 535 {
+			t.Fatalf("failure %d: code = %d, want 535", i+1, code)
+		}
+	}
+	// Failure 3 finds the bucket empty: 421 and the connection closes.
+	_ = tp.PrintfLine("AUTH PLAIN %s", authPlainCreds("user", "wrong"))
+	code, _ := expectCode(t, tp)
+	if code != 421 {
+		t.Fatalf("post-budget failure: code = %d, want 421", code)
+	}
+	if _, err := tp.ReadLine(); err == nil {
+		t.Error("connection should be closed after the 421 lockout")
+	}
+}
+
+func TestSMTP_AuthBruteForce_MalformedCredsCountToo(t *testing.T) {
+	// Malformed base64 counts against the same budget as wrong
+	// passwords — scanners produce both shapes.
+	oldBudget := authFailureBudget
+	authFailureBudget = 1
+	t.Cleanup(func() { authFailureBudget = oldBudget })
+
+	f := startListener(t, baseTestConfig())
+	tp := f.dial()
+	_ = tp.PrintfLine("EHLO client.test")
+	expectMultiline(t, tp, 250)
+
+	_ = tp.PrintfLine("AUTH PLAIN not-base64!!!")
+	if code, _ := expectCode(t, tp); code != 535 {
+		t.Fatalf("first malformed AUTH: code = %d, want 535", code)
+	}
+	_ = tp.PrintfLine("AUTH PLAIN not-base64!!!")
+	if code, _ := expectCode(t, tp); code != 421 {
+		t.Fatalf("second malformed AUTH: code = %d, want 421 lockout", code)
+	}
+}
+
+func TestSMTP_AuthSuccess_DoesNotConsumeBudget(t *testing.T) {
+	oldBudget := authFailureBudget
+	authFailureBudget = 1
+	t.Cleanup(func() { authFailureBudget = oldBudget })
+
+	f := startListener(t, baseTestConfig())
+	tp := f.dial()
+	_ = tp.PrintfLine("EHLO client.test")
+	expectMultiline(t, tp, 250)
+
+	// Repeated successful auths never trip the limiter.
+	for i := 0; i < 3; i++ {
+		_ = tp.PrintfLine("AUTH PLAIN %s", authPlainCreds("user", "pass"))
+		if code, _ := expectCode(t, tp); code != 235 {
+			t.Fatalf("successful auth %d: code = %d, want 235", i+1, code)
+		}
+	}
+}
+
+func TestSMTP_PerIPConnectionCap_421(t *testing.T) {
+	cfg := baseTestConfig()
+	cfg.MaxConnectionsPerIP = 1
+	f := startListener(t, cfg)
+
+	// First connection holds its slot.
+	_ = f.dial()
+
+	// Second connection from the same IP must get 421 and close.
+	conn, err := net.Dial("tcp", f.addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	tp := textproto.NewConn(conn)
+	code, msg, err := tp.ReadResponse(0)
+	if err != nil {
+		if er, ok := err.(*textproto.Error); ok {
+			code, msg = er.Code, er.Msg
+		} else {
+			t.Fatalf("read banner: %v", err)
+		}
+	}
+	if code != 421 {
+		t.Fatalf("second connection banner = %d %q, want 421", code, msg)
+	}
+}
+
+func TestSMTP_GlobalConnectionCap_421(t *testing.T) {
+	cfg := baseTestConfig()
+	cfg.MaxConnections = 1
+	cfg.MaxConnectionsPerIP = 10 // ensure the global cap trips first
+	f := startListener(t, cfg)
+
+	_ = f.dial()
+
+	conn, err := net.Dial("tcp", f.addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	tp := textproto.NewConn(conn)
+	code, _, err := tp.ReadResponse(0)
+	if err != nil {
+		if er, ok := err.(*textproto.Error); ok {
+			code = er.Code
+		} else {
+			t.Fatalf("read banner: %v", err)
+		}
+	}
+	if code != 421 {
+		t.Fatalf("over-cap connection banner = %d, want 421", code)
+	}
+}
+
+func TestSMTP_ConnectionSlot_ReleasedOnClose(t *testing.T) {
+	cfg := baseTestConfig()
+	cfg.MaxConnectionsPerIP = 1
+	f := startListener(t, cfg)
+
+	tp1 := f.dial()
+	_ = tp1.PrintfLine("QUIT")
+	expect(t, tp1, 221)
+
+	// The slot frees once the session goroutine exits; poll briefly.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		f.listener.connMu.Lock()
+		active := f.listener.activeConns
+		f.listener.connMu.Unlock()
+		if active == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("connection slot not released after QUIT")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// A new connection now succeeds.
+	tp2 := f.dial()
+	_ = tp2.PrintfLine("NOOP")
+	expect(t, tp2, 250)
+}
+
+// TestSMTP_AuthNone_SenderAllowlist_StillEnforced confirms the open-relay
+// prevention layer survives even when auth is disabled. AllowedSenders
+// is the only thing standing between the listener and a true open relay
+// in this mode, so the test is load-bearing.
 func TestSMTP_AuthNone_SenderAllowlist_StillEnforced(t *testing.T) {
 	cfg := baseTestConfig()
 	cfg.AuthRequired = AuthNone

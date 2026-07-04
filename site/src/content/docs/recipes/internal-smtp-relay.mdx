@@ -22,6 +22,8 @@ The principle: if network access to Posthorn already implies trust (because the 
 
 <Aside type="caution" title="Private network only">
 `auth_required = "none"` is only safe when the listener is **not reachable from the public internet**. If you `ports: - "2525:2525"` to a host port that's externally reachable, you've created an open SMTP relay. Either keep the listener purely internal to a Docker network (no `ports:` exposure) OR bind to a loopback address (`127.0.0.1:2525:2525`).
+
+Posthorn enforces this at config-parse time: `auth_required = "none"` on a bind address it can't verify as loopback/private is a startup error unless you set `trusted_network = true` — your explicit assertion that the network the listener sits on is the trust boundary. Inside Docker, binding `:2525` with no `ports:` exposure qualifies; that's why the recipes set it.
 </Aside>
 
 ## Walkthrough
@@ -62,6 +64,7 @@ The principle: if network access to Posthorn already implies trust (because the 
    listen          = ":2525"
    auth_required   = "none"
    require_tls     = false
+   trusted_network = true             # required with auth "none": asserts the Docker network (no ports: exposure) is the trust boundary
    allowed_senders = ["*@yourdomain.com"]
    max_recipients_per_session = 10
    max_message_size = "1MB"

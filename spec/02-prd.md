@@ -266,6 +266,10 @@ Block D adds SMTP ingress — the strategic feature that completes the gateway t
 
 **FR68.** The SMTP listener **must** parse the DATA payload as MIME, construct a `transport.Message`, and pass it through the configured transport. The transport is configured via `smtp_listener.transport` (same shape as `endpoints.transport`). One SMTP listener has exactly one outbound transport; multi-tenant routing-by-RCPT is deferred to v2 (see ADR-13).
 
+**FR69** (added 2026-07-03, #41). When `smtp_listener.auth_required = "none"`, Posthorn **must** reject at config-parse time any `listen` address it cannot verify as loopback or RFC1918/ULA/link-local private (including the unspecified/all-interfaces bind and unresolvable hostnames), unless the operator sets `smtp_listener.trusted_network = true`. The rationale: with auth disabled the sender allowlist is the only ingress gate, so an unauthenticated public bind is an open relay; `trusted_network` is the operator's explicit assertion that network reachability already implies trust. `localhost` and loopback/private IPs pass without the flag.
+
+**FR70** (added 2026-07-03, #50). The SMTP listener **must** rate-limit AUTH failures per remote IP using the same token-bucket policy as the HTTP api-mode brute-force defense (default 10 failures per minute). Once the budget is exhausted, further failed AUTH attempts from that IP **must** receive `421` and the connection **must** close; successful auths **must not** consume budget. Malformed AUTH credentials count as failures. The listener **must** also enforce a global concurrent-connection cap (`smtp_listener.max_connections`, default 100) and a per-IP cap (`smtp_listener.max_connections_per_ip`, default 16); connections exceeding either cap receive `421` and close before any protocol exchange.
+
 ## Non-functional requirements — block B (added 2026-05-16)
 
 **NFR19.** API-key comparison **must** use `crypto/subtle.ConstantTimeCompare`. Tests **must** verify the constant-time pattern is in source (not benchmarked).
