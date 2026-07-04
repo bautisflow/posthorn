@@ -423,7 +423,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("request body too large (limit: %d bytes)", h.maxBodySize))
 				return
 			}
-			http.Error(w, fmt.Sprintf("parse JSON: %v", err), http.StatusBadRequest)
+			// API-shape violations authored by parseJSONBody are echoed
+			// (useful to the authenticated caller); raw decoder internals
+			// stay server-side and the client gets a generic 400 (#42).
+			// The log line always carries the full detail.
+			msg := "malformed request body"
+			var vis *clientVisibleError
+			if errors.As(err, &vis) {
+				msg = vis.msg
+			}
+			logger.Info("body_parse_failed",
+				slog.String("kind", "json"),
+				slog.String("reason", err.Error()),
+				slog.Int64("latency_ms", time.Since(start).Milliseconds()),
+			)
+			h.writeErrorResponse(w, r, http.StatusBadRequest, msg)
 			return
 		}
 		r.Form = values
@@ -439,7 +453,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("request body too large (limit: %d bytes)", h.maxBodySize))
 				return
 			}
-			http.Error(w, fmt.Sprintf("parse form: %v", err), http.StatusBadRequest)
+			// Generic 400; detail logged server-side (#42), see above.
+			logger.Info("body_parse_failed",
+				slog.String("kind", "form"),
+				slog.String("reason", err.Error()),
+				slog.Int64("latency_ms", time.Since(start).Milliseconds()),
+			)
+			h.writeErrorResponse(w, r, http.StatusBadRequest, "malformed request body")
 			return
 		}
 	}
@@ -902,6 +922,15 @@ func isJSONContentType(ct string) bool {
 	return ct == "application/json"
 }
 
+// clientVisibleError marks a body-parse error whose message is authored
+// by this package (an API-shape violation like a nested object) and is
+// safe and useful to echo to the authenticated API caller. Raw decoder
+// errors from the stdlib are NOT wrapped in this type and stay
+// server-side — the client gets a generic 400 (#42).
+type clientVisibleError struct{ msg string }
+
+func (e *clientVisibleError) Error() string { return e.msg }
+
 // parseJSONBody decodes a JSON object request body into a url.Values map,
 // matching the shape produced by r.ParseForm so the downstream validation,
 // templating, and transport pipeline can be ingress-agnostic (FR36, FR38,
@@ -928,7 +957,7 @@ func parseJSONBody(body io.Reader) (url.Values, error) {
 	// or `{}garbage`. dec.More() reports whether the decoder has more JSON
 	// values to consume from the stream.
 	if dec.More() {
-		return nil, errors.New("unexpected trailing content after top-level JSON object")
+		return nil, &clientVisibleError{"unexpected trailing content after top-level JSON object"}
 	}
 
 	out := make(url.Values, len(raw))
@@ -949,9 +978,9 @@ func parseJSONBody(body io.Reader) (url.Values, error) {
 			}
 			out[k] = strs
 		case map[string]any:
-			return nil, fmt.Errorf("nested objects are not supported in v1.1 (field %q is an object)", k)
+			return nil, &clientVisibleError{fmt.Sprintf("nested objects are not supported in v1.1 (field %q is an object)", k)}
 		default:
-			return nil, fmt.Errorf("unsupported JSON type for field %q: %T", k, v)
+			return nil, &clientVisibleError{fmt.Sprintf("unsupported JSON type for field %q: %T", k, v)}
 		}
 	}
 	return out, nil
@@ -973,7 +1002,7 @@ func coerceJSONArray(field string, arr []any) ([]string, error) {
 		case float64:
 			out = append(out, formatJSONNumber(val))
 		default:
-			return nil, fmt.Errorf("field %q[%d]: nested arrays and objects are not supported in v1.1", field, i)
+			return nil, &clientVisibleError{fmt.Sprintf("field %q[%d]: nested arrays and objects are not supported in v1.1", field, i)}
 		}
 	}
 	return out, nil

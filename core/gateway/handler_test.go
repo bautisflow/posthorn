@@ -349,6 +349,33 @@ func TestHandler_ParseFormError_BadRequest(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", rec.Code)
 	}
+	// #42: parser internals must not be echoed to the client. The stdlib
+	// error for "%ZZ" mentions "invalid URL escape"; the response must not.
+	if strings.Contains(rec.Body.String(), "invalid URL escape") {
+		t.Errorf("response echoes parser internals: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "malformed request body") {
+		t.Errorf("response should carry the generic parse message, got: %s", rec.Body.String())
+	}
+}
+
+func TestAPIJSON_DecoderError_Generic400(t *testing.T) {
+	// #42: raw stdlib JSON decoder errors ("invalid character ...") stay
+	// server-side; the client gets the generic message. Contrast with
+	// TestAPIJSON_NestedObject_400 where the project-authored API-shape
+	// message IS echoed.
+	h, _ := gateway.New(apiModeConfig("valid-key"), &recordingTransport{})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, apiRequest(`{"name": not-json}`, "valid-key"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "invalid character") {
+		t.Errorf("response echoes decoder internals: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "malformed request body") {
+		t.Errorf("response should carry the generic parse message, got: %s", rec.Body.String())
+	}
 }
 
 func TestHandler_EmptyBody_OK(t *testing.T) {

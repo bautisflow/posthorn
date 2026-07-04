@@ -113,11 +113,19 @@ func runServe(args []string) error {
 		return fmt.Errorf("build router: %w", err)
 	}
 
+	// ReadTimeout/WriteTimeout sit above the handler's 10s request
+	// timeout so a slow-body sender or slow-reading client can't hold a
+	// connection past the bound the handler already enforces (#42).
+	// WriteTimeout starts when the request headers are read, so it must
+	// cover handler time plus the response write.
 	server := &http.Server{
 		Addr:              *listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10, // 64 KB; explicit, was stdlib 1MB default
 	}
 
 	// HTTP ingress is the v1.0 form/api-mode listener. v1.0 block D
