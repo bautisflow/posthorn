@@ -60,7 +60,7 @@ MAILGUN_API_KEY=$(pass show posthorn/mailgun-test) MAILGUN_DOMAIN=sandboxXXX.mai
 
 In CI the live tier runs only via [`integration-live.yml`](./.github/workflows/integration-live.yml) — manual dispatch or a weekly schedule, on the canonical repo, behind the protected `live-providers` Environment. It never runs on pull requests, so fork contributors can never reach a credential. SES authenticates via GitHub OIDC (no stored AWS key). The design and remaining slices are tracked in [issue #76](https://github.com/craigmccaskill/posthorn/issues/76).
 
-The older [manual end-to-end procedure](./docs/manual-test.md) remains the reference for a full-binary check (form mode, API mode, SMTP listener) and for asserting real delivery + DKIM/SPF against an inbox — the piece the automated live tier defers until a delivery target is chosen.
+The live tier stops at "the real provider accepted a well-formed request" — it does **not** assert inbox delivery or DKIM/SPF. That's deliberate: the provider signs and owns reputation, and Posthorn is upstream of signing, so DKIM is not ours to test (see the brief's outbound-abuse posture). The older [manual end-to-end procedure](./docs/manual-test.md) remains the reference for a full-binary walkthrough (form mode, API mode, SMTP listener) when you want to eyeball a real send by hand.
 
 ## Commit conventions
 
