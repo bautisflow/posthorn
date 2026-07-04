@@ -33,23 +33,34 @@ Posthorn is a single Go module:
 
 ## Build and test
 
+A `Makefile` at the repo root wraps the common tasks (`make help` lists them):
+
 ```bash
-# Run the test suite
-cd core && go test -race ./...
-
-# Build the binary
-go build -o posthorn ./cmd/posthorn
-./posthorn version
-
-# Build the docs site
-cd site && npm ci && npm run build
+make test        # hermetic suite with the race detector — no network, no keys
+make lint        # golangci-lint
+make build       # build the posthorn binary
+make site        # build the docs site
 ```
 
-CI runs `go vet ./...` and `go test -race -count=1 -timeout=2m ./...` on every push and pull request. See [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
+`make test` needs **no third-party credentials** and is the everyday gate. It includes the `core/providertest/` harness — ingress→egress end-to-end tests that drive a real form (or a real `net/smtp` client) through the real gateway/listener and the real transport into a fake provider, asserting the wire shape and header-injection safety. CI runs exactly this on every push and PR (`go test -race ./...`); see [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
-## End-to-end smoke test
+### Live-provider validation
 
-Whenever you touch `core/gateway/`, `core/transport/`, `core/template/`, `core/smtp/`, `core/ingress/`, or `core/config/`, run the [manual end-to-end test](./docs/manual-test.md) against a real provider account before opening a PR. The unit tests cover config and pipeline behavior; the manual procedure exercises the full request pipeline through the transport and confirms mail actually delivers. The manual-test doc covers form mode, API mode (Bearer auth + idempotency), and the SMTP listener.
+```bash
+make test-live   # -tags integration: real provider APIs, non-delivering targets
+```
+
+The live tier hits real provider endpoints against non-delivering targets (Postmark's public test token, the SES simulator, Resend's `delivered@resend.dev`). Postmark uses a **public** token and always runs; the others **skip** unless you supply credentials via the environment — source them from your secret store, e.g.:
+
+```bash
+RESEND_API_KEY=$(pass show posthorn/resend-test) \
+MAILGUN_API_KEY=$(pass show posthorn/mailgun-test) MAILGUN_DOMAIN=sandboxXXX.mailgun.org \
+  make test-live
+```
+
+In CI the live tier runs only via [`integration-live.yml`](./.github/workflows/integration-live.yml) — manual dispatch or a weekly schedule, on the canonical repo, behind the protected `live-providers` Environment. It never runs on pull requests, so fork contributors can never reach a credential. SES authenticates via GitHub OIDC (no stored AWS key). The design and remaining slices are tracked in [issue #76](https://github.com/craigmccaskill/posthorn/issues/76).
+
+The live tier stops at "the real provider accepted a well-formed request" — it does **not** assert inbox delivery or DKIM/SPF. That's deliberate: the provider signs and owns reputation, and Posthorn is upstream of signing, so DKIM is not ours to test (see the brief's outbound-abuse posture). The older [manual end-to-end procedure](./docs/manual-test.md) remains the reference for a full-binary walkthrough (form mode, API mode, SMTP listener) when you want to eyeball a real send by hand.
 
 ## Commit conventions
 
