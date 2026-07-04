@@ -297,12 +297,9 @@ func TestValidate_PostmarkAPIKeyRequired(t *testing.T) {
 // --- Validation: NFR4 — allowed_origins explicitly empty ---
 
 func TestValidate_AllowedOriginsExplicitlyEmpty(t *testing.T) {
-	bad := minimalTOML + `allowed_origins = []
-`
-	// The append above adds at the end of the previous endpoint table — we
-	// need to inject inside the endpoint block before the [endpoints.transport]
-	// sub-table. Rebuild manually for clarity.
-	bad = `
+	// allowed_origins must be injected inside the endpoint block before
+	// the [endpoints.transport] sub-table, so build the TOML manually.
+	bad := `
 [[endpoints]]
 path = "/api/contact"
 to = ["craig@example.com"]
@@ -445,7 +442,7 @@ func TestLoad_EnvVarMissing(t *testing.T) {
 	// Make sure the var is unset for this test even if the test environment
 	// has it set globally.
 	t.Setenv("DEFINITELY_UNSET_FOR_THIS_TEST", "x")
-	os.Unsetenv("DEFINITELY_UNSET_FOR_THIS_TEST")
+	_ = os.Unsetenv("DEFINITELY_UNSET_FOR_THIS_TEST")
 
 	c := strings.Replace(minimalTOML, `api_key = "test-key"`, `api_key = "${env.DEFINITELY_UNSET_FOR_THIS_TEST}"`, 1)
 	_, err := loadString(t, c)
@@ -460,8 +457,8 @@ func TestLoad_EnvVarMissing(t *testing.T) {
 func TestLoad_EnvVarMissing_AllReportedTogether(t *testing.T) {
 	// Operators benefit from seeing all unset vars at once rather than
 	// re-running on each fix. Verify the loader collects them.
-	os.Unsetenv("MISSING_A")
-	os.Unsetenv("MISSING_B")
+	_ = os.Unsetenv("MISSING_A")
+	_ = os.Unsetenv("MISSING_B")
 
 	c := `
 [[endpoints]]

@@ -896,8 +896,8 @@ func TestHandler_RateLimit_DifferentIPsIndependent(t *testing.T) {
 
 // scriptedTransport returns a sequence of pre-set errors.
 type scriptedTransport struct {
-	calls    int
-	results  []error // index = call number (0-based); past end = nil
+	calls   int
+	results []error // index = call number (0-based); past end = nil
 }
 
 func (s *scriptedTransport) Send(_ context.Context, _ transport.Message) (transport.SendResult, error) {

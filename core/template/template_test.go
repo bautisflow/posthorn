@@ -178,7 +178,7 @@ func TestRenderBody_ExtrasSorted(t *testing.T) {
 	if idxAlpha < 0 || idxMike < 0 || idxZeta < 0 {
 		t.Fatalf("missing keys in body: %q", got)
 	}
-	if !(idxAlpha < idxMike && idxMike < idxZeta) {
+	if idxAlpha >= idxMike || idxMike >= idxZeta {
 		t.Errorf("not sorted alphabetically: alpha@%d mike@%d zeta@%d", idxAlpha, idxMike, idxZeta)
 	}
 }

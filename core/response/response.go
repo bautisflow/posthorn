@@ -43,8 +43,8 @@ type Success struct {
 // passed to transport.Send so operators can debug template rendering
 // and recipient resolution without sending mail.
 type DryRun struct {
-	Status          string         `json:"status"`
-	SubmissionID    string         `json:"submission_id"`
+	Status          string          `json:"status"`
+	SubmissionID    string          `json:"submission_id"`
 	PreparedMessage PreparedMessage `json:"prepared_message"`
 }
 

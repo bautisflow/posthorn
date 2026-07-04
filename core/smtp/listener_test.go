@@ -424,7 +424,7 @@ func TestSMTP_MessageSizeCap_552(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	tp := textproto.NewConn(conn)
 	_, _, _ = tp.ReadResponse(220)
 
@@ -578,7 +578,7 @@ func expectMultiline(t *testing.T, tp *textproto.Conn, wantCode int) {
 			t.Fatalf("malformed reply: %q", line)
 		}
 		var code int
-		fmt.Sscanf(line[:3], "%d", &code)
+		_, _ = fmt.Sscanf(line[:3], "%d", &code)
 		if code != wantCode {
 			t.Fatalf("got code %d, want %d (line %q)", code, wantCode, line)
 		}

@@ -141,7 +141,7 @@ func (m *MailgunTransport) Send(ctx context.Context, msg Message) (SendResult, e
 			Message: "mailgun request failed",
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, mailgunResponseSizeLimit))
 

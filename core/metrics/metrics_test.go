@@ -182,7 +182,7 @@ func TestRegistry_EmitsAllSortedByName(t *testing.T) {
 	if aaa < 0 || mmm < 0 || zzz < 0 {
 		t.Fatalf("metric missing from output: %s", out)
 	}
-	if !(aaa < mmm && mmm < zzz) {
+	if aaa >= mmm || mmm >= zzz {
 		t.Errorf("metrics not in sorted order: aaa=%d mmm=%d zzz=%d", aaa, mmm, zzz)
 	}
 }

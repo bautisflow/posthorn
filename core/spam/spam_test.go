@@ -138,8 +138,8 @@ func TestOrigin_OriginWinsOverReferer(t *testing.T) {
 	// Origin is more specific; if it's set, use it. Don't try Referer
 	// as a fallback when Origin disagrees.
 	got, _ := spam.CheckOrigin(
-		"https://attacker.example",                // not allowed
-		"https://example.com/legit-looking-page",  // would match if used
+		"https://attacker.example",               // not allowed
+		"https://example.com/legit-looking-page", // would match if used
 		[]string{"https://example.com"},
 	)
 	// Origin wins. Although CheckOrigin tries Referer when Origin doesn't

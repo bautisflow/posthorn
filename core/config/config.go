@@ -42,17 +42,17 @@ type SMTPListenerConfig struct {
 	// plaintext, only sensible for local development).
 	RequireTLS *bool `toml:"require_tls"`
 
-	TLSCert                 string              `toml:"tls_cert"`
-	TLSKey                  string              `toml:"tls_key"`
-	ClientCertCA            string              `toml:"client_cert_ca"`
-	AuthRequired            string              `toml:"auth_required"`
-	SMTPUsers               []SMTPUser          `toml:"smtp_users"`
-	AllowedSenders          []string            `toml:"allowed_senders"`
-	AllowedRecipients       []string            `toml:"allowed_recipients"`
-	MaxRecipientsPerSession int                 `toml:"max_recipients_per_session"`
-	MaxMessageSize          string              `toml:"max_message_size"`
-	IdleTimeout             Duration            `toml:"idle_timeout"`
-	Transport               TransportConfig     `toml:"transport"`
+	TLSCert                 string          `toml:"tls_cert"`
+	TLSKey                  string          `toml:"tls_key"`
+	ClientCertCA            string          `toml:"client_cert_ca"`
+	AuthRequired            string          `toml:"auth_required"`
+	SMTPUsers               []SMTPUser      `toml:"smtp_users"`
+	AllowedSenders          []string        `toml:"allowed_senders"`
+	AllowedRecipients       []string        `toml:"allowed_recipients"`
+	MaxRecipientsPerSession int             `toml:"max_recipients_per_session"`
+	MaxMessageSize          string          `toml:"max_message_size"`
+	IdleTimeout             Duration        `toml:"idle_timeout"`
+	Transport               TransportConfig `toml:"transport"`
 }
 
 // SMTPUser is a single AUTH PLAIN credential pair.

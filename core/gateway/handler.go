@@ -76,9 +76,9 @@ type Handler struct {
 	authFailLimiter      *ratelimit.Limiter // nil on form-mode endpoints; per-IP brute-force defense for api-mode 401s
 	idemCache            *idempotency.Cache // nil on form-mode endpoints
 	trustedProxies       []netip.Prefix
-	emailField           string // resolved at construction (cfg.EmailField or default)
-	maxBodySize          int64  // 0 = no cap
-	logFailedSubmissions bool   // resolved at construction (default true)
+	emailField           string        // resolved at construction (cfg.EmailField or default)
+	maxBodySize          int64         // 0 = no cap
+	logFailedSubmissions bool          // resolved at construction (default true)
 	csrfTokenTTL         time.Duration // resolved at construction (cfg.CSRFTokenTTL or default)
 	logger               *slog.Logger
 	recorder             *metrics.Recorder // nil = no-op (default)
@@ -255,6 +255,7 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 //  7. Honeypot check   → silent 200 if filled → 200 (silent)
 //  8. Required fields  → all required present and non-empty → 422
 //  9. Email format     → submitter email well-formed → 422
+//
 // 10. Render subject/body, transport.Send (with retries) → 200 or 502
 //
 // Submission lifecycle is logged at every decision point with a
