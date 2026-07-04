@@ -187,10 +187,39 @@ func TestLoad_InvalidTOML(t *testing.T) {
 
 // --- Validation: top-level ---
 
-func TestValidate_NoEndpoints(t *testing.T) {
+func TestValidate_NoIngress(t *testing.T) {
+	// Neither [[endpoints]] nor [smtp_listener] — nothing to serve.
 	_, err := loadString(t, "[logging]\nformat = \"json\"\n")
-	if err == nil || !strings.Contains(err.Error(), "at least one endpoint") {
+	if err == nil || !strings.Contains(err.Error(), "at least one ingress") {
 		t.Errorf("error: %v", err)
+	}
+}
+
+func TestValidate_SMTPListenerOnly(t *testing.T) {
+	// An [smtp_listener] block with zero [[endpoints]] is a first-class
+	// deployment shape (the Ghost/Gitea recipes); it must validate.
+	// Regression test for issue #37.
+	c := `
+[smtp_listener]
+listen          = ":2525"
+allowed_senders = ["*@example.com"]
+
+[[smtp_listener.smtp_users]]
+username = "u"
+password = "p"
+
+[smtp_listener.transport]
+type = "postmark"
+
+[smtp_listener.transport.settings]
+api_key = "test-key"
+`
+	cfg, err := loadString(t, c)
+	if err != nil {
+		t.Fatalf("smtp_listener-only config should validate, got: %v", err)
+	}
+	if len(cfg.Endpoints) != 0 || cfg.SMTPListener == nil {
+		t.Fatalf("unexpected shape: endpoints=%d listener=%v", len(cfg.Endpoints), cfg.SMTPListener)
 	}
 }
 

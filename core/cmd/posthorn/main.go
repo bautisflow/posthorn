@@ -269,7 +269,11 @@ func runValidate(args []string) error {
 		}
 	}
 
-	fmt.Printf("config OK: %d endpoint(s)\n", len(cfg.Endpoints))
+	summary := fmt.Sprintf("%d endpoint(s)", len(cfg.Endpoints))
+	if cfg.SMTPListener != nil {
+		summary += " + smtp_listener"
+	}
+	fmt.Printf("config OK: %s\n", summary)
 	return nil
 }
 

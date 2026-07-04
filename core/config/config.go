@@ -239,8 +239,12 @@ func resolveEnvVars(raw []byte) ([]byte, error) {
 // Validate checks structural and semantic constraints on a parsed Config.
 // Returns the first error; runs cheap checks before expensive ones.
 func (c *Config) Validate() error {
-	if len(c.Endpoints) == 0 {
-		return errors.New("at least one endpoint required")
+	// An SMTP-listener-only deployment is a first-class shape (the
+	// Ghost/Gitea recipes run exactly this); the HTTP mux still serves
+	// /healthz and /metrics with zero endpoints. Require at least one
+	// ingress of either kind.
+	if len(c.Endpoints) == 0 && c.SMTPListener == nil {
+		return errors.New("at least one ingress required: define [[endpoints]] or [smtp_listener]")
 	}
 
 	seenPaths := map[string]bool{}
