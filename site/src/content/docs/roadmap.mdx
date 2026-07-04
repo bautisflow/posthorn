@@ -85,7 +85,7 @@ The architectural shift that unlocks operating Posthorn as a real mail platform:
 - **HTML body support**
 - **File attachments** — multipart form uploads forwarded to the transport
 - **Multiple outputs per endpoint** — email + webhook + log fan-out for the same submission
-- **Multi-tenant SMTP routing** — RCPT-driven transport selection (one SMTP listener serves multiple tenants with separate sender identities)
+- **Multi-tenant SMTP routing** — sender-driven transport selection (envelope `MAIL FROM` picks the tenant's provider account, with recipient as an optional secondary match; one SMTP listener serves multiple tenants with separate sender identities). See the design discussion in [issue #30](https://github.com/craigmccaskill/posthorn/issues/30).
 
 The `Transport.Send` interface stays the synchronous primitive; the queue wraps it. v1.0 deployments keep working unchanged.
 
