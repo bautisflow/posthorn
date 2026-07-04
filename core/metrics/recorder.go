@@ -18,15 +18,16 @@ var LatencyBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10}
 // without an enabling-condition check; tests that don't care about
 // metrics pass nil.
 type Recorder struct {
-	submitted        *Counter
-	sent             *Counter
-	failed           *Counter
-	rateLimited      *Counter
-	authFailed       *Counter
-	spamBlocked      *Counter
-	validationFailed *Counter
-	idempotentReplay *Counter
-	sendLatency      *Histogram
+	submitted            *Counter
+	sent                 *Counter
+	failed               *Counter
+	rateLimited          *Counter
+	authFailed           *Counter
+	spamBlocked          *Counter
+	reputationFailedOpen *Counter
+	validationFailed     *Counter
+	idempotentReplay     *Counter
+	sendLatency          *Histogram
 }
 
 // NewRecorder constructs a Recorder backed by counters and histograms
@@ -60,8 +61,13 @@ func NewRecorder(reg *Registry) *Recorder {
 		),
 		spamBlocked: NewCounter(
 			"posthorn_spam_blocked_total",
-			"Form-mode submissions rejected by spam defenses (honeypot/origin silent-200; csrf 403).",
+			"Form-mode submissions rejected by spam defenses (honeypot/origin silent-200; csrf/reputation 403).",
 			[]string{"endpoint", "kind"},
+		),
+		reputationFailedOpen: NewCounter(
+			"posthorn_reputation_failed_open_total",
+			"Reputation lookups that errored and were allowed through (fail-open). A rising rate is a silent-bypass window.",
+			[]string{"endpoint"},
 		),
 		validationFailed: NewCounter(
 			"posthorn_validation_failed_total",
@@ -86,6 +92,7 @@ func NewRecorder(reg *Registry) *Recorder {
 	reg.Register(r.rateLimited)
 	reg.Register(r.authFailed)
 	reg.Register(r.spamBlocked)
+	reg.Register(r.reputationFailedOpen)
 	reg.Register(r.validationFailed)
 	reg.Register(r.idempotentReplay)
 	reg.Register(r.sendLatency)
@@ -138,13 +145,22 @@ func (r *Recorder) AuthFailed(endpoint string) {
 }
 
 // SpamBlocked records a spam-check rejection. kind is "honeypot",
-// "origin", or "csrf" — an operator-facing enum, never submitter
-// content (NFR24).
+// "origin", "csrf", or "reputation" — an operator-facing enum, never
+// submitter content (NFR24).
 func (r *Recorder) SpamBlocked(endpoint, kind string) {
 	if r == nil {
 		return
 	}
 	r.spamBlocked.Inc(endpoint, kind)
+}
+
+// ReputationFailedOpen records a reputation lookup that errored and was
+// allowed through (fail-open) — a silent-bypass signal for operators.
+func (r *Recorder) ReputationFailedOpen(endpoint string) {
+	if r == nil {
+		return
+	}
+	r.reputationFailedOpen.Inc(endpoint)
 }
 
 // ValidationFailed records a 422 response for required-fields or

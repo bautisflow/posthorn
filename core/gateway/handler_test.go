@@ -2482,6 +2482,104 @@ func TestSpamPipeline_FormChecks_Order(t *testing.T) {
 	}
 }
 
+// --- Reputation check (#44) ---
+
+func reputationEndpoint(sfsURL string, confidence float64) config.EndpointConfig {
+	return config.EndpointConfig{
+		Path:       "/contact",
+		To:         []string{"ops@example.com"},
+		From:       "noreply@example.com",
+		Subject:    "Contact",
+		Body:       "{{.message}}",
+		Required:   []string{"email", "message"},
+		EmailField: "email",
+		Reputation: &config.ReputationConfig{
+			Provider:   "stopforumspam",
+			Check:      []string{"email", "ip"},
+			Confidence: confidence,
+			BaseURL:    sfsURL,
+		},
+	}
+}
+
+func TestReputation_BlocksListedEmail(t *testing.T) {
+	sfs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"success":1,"email":{"appears":1,"confidence":99},"ip":{"appears":0,"confidence":0}}`))
+	}))
+	defer sfs.Close()
+
+	rt := &recordingTransport{}
+	reg := metrics.New()
+	h, err := gateway.New(reputationEndpoint(sfs.URL, 95), rt, gateway.WithRecorder(metrics.NewRecorder(reg)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest("email=zekisuquc419@gmail.com&message=hi"))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a listed identity; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(rt.sent) != 0 {
+		t.Errorf("blocked submission still sent %d messages", len(rt.sent))
+	}
+	scrape := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if want := `posthorn_spam_blocked_total{endpoint="/contact",kind="reputation"} 1`; !strings.Contains(scrape.Body.String(), want) {
+		t.Errorf("missing %q in metrics:\n%s", want, scrape.Body.String())
+	}
+}
+
+func TestReputation_PassesUnlistedIdentity(t *testing.T) {
+	sfs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"success":1,"email":{"appears":0,"confidence":0},"ip":{"appears":0,"confidence":0}}`))
+	}))
+	defer sfs.Close()
+
+	rt := &recordingTransport{}
+	h, _ := gateway.New(reputationEndpoint(sfs.URL, 95), rt)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest("email=real@example.com&message=hello"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for an unlisted identity; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(rt.sent) != 1 {
+		t.Errorf("legit submission sent %d messages, want 1", len(rt.sent))
+	}
+}
+
+func TestReputation_FailOpen_SendsAndMeters(t *testing.T) {
+	// Closed server → lookup errors → fail-open (default): the mail still
+	// sends, and the bypass is metered.
+	sfs := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	sfsURL := sfs.URL
+	sfs.Close()
+
+	cfg := reputationEndpoint(sfsURL, 95)
+	cfg.Reputation.Timeout = config.Duration(200 * time.Millisecond)
+	rt := &recordingTransport{}
+	reg := metrics.New()
+	h, err := gateway.New(cfg, rt, gateway.WithRecorder(metrics.NewRecorder(reg)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest("email=someone@example.com&message=hi"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (fail-open sends); body=%s", rec.Code, rec.Body.String())
+	}
+	if len(rt.sent) != 1 {
+		t.Errorf("fail-open sent %d messages, want 1", len(rt.sent))
+	}
+	scrape := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if want := `posthorn_reputation_failed_open_total{endpoint="/contact"} 1`; !strings.Contains(scrape.Body.String(), want) {
+		t.Errorf("missing fail-open metric %q:\n%s", want, scrape.Body.String())
+	}
+}
+
 func TestCSRF_ValidToken_Succeeds(t *testing.T) {
 	rt := &recordingTransport{}
 	cfg := csrfConfig(csrfTestSecret)
