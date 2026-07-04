@@ -24,9 +24,9 @@ These pin the shape of Posthorn across versions and override new feature request
 
 When a feature request or implementation proposal conflicts with one of these, the principle wins. Take it back to spec discussion before changing code.
 
-## Status (as of 2026-06-10)
+## Status (as of 2026-07-03)
 
-**Phase:** v1.0.0 shipped. Tagged and released 2026-05-26 (GitHub Release + multi-arch GHCR image). Launch landed: 196 stars / 7 forks and the first external feature request ([#30](https://github.com/craigmccaskill/posthorn/issues/30)) as of 2026-06-10. Every commit since the tag is docs/site work. Next milestone: **v1.1 — Spam protection minor** (defined 2026-06-03; [milestone 1](https://github.com/craigmccaskill/posthorn/milestone/1), issues #31–36; no code started). The site's [roadmap page](./site/src/content/docs/roadmap.mdx) is the canonical public roadmap.
+**Phase:** v1.0.0 shipped. Tagged and released 2026-05-26 (GitHub Release + multi-arch GHCR image). 203 stars / 10 forks as of 2026-07-03; two external humans engaged (amit-tewari #30 multi-tenant SMTP; monperrus built python-posthorn, merged docs PR #48). **2026-07-03 full audit completed**: v1.0.1 patch in [PR #49](https://github.com/craigmccaskill/posthorn/pull/49) (fixes #37 listener-only-config bug + #42 hardening + spam observability; awaiting live-provider manual test before merge/tag); audit findings filed as #50–#60 (security #50–56, architecture #57–60). Next milestone: **v1.1 — Spam protection minor** ([milestone 1](https://github.com/craigmccaskill/posthorn/milestone/1), reshaped 2026-07-03: #31–34, #44, #45, #60 pre-work, #61–63 scope additions; #35/#36 demoted; no code started). The site's [roadmap page](./site/src/content/docs/roadmap.mdx) is the canonical public roadmap; the 2026-07-03 brief status-log entry records the scope amendment.
 
 **Pre-tag hardening (2026-05-17 → 2026-05-26), after the v1.0 scope freeze:**
 - `redirect_success` / `redirect_error` were configured-but-never-wired in the handler; fixed in `a470328` during the full site audit pass.
@@ -37,8 +37,9 @@ When a feature request or implementation proposal conflicts with one of these, t
 
 **Operator validation truth (was Story 12.3):** Postmark (2026-05-16) and Resend (2026-05-24, recorded in [docs/manual-test.md](docs/manual-test.md) with DKIM/SPF pass + NFR3 sentinel check) are validated against live accounts. **Mailgun, AWS SES, outbound-SMTP relay, and the SMTP listener shipped without recorded live validation.** Manual-test procedures exist for all of them; this is open operational debt, not closed.
 
-**Issue tracker (groomed, all milestoned):**
-- v1.1 spam minor: #31–36 (multiple honeypots, CSRF min-age, Turnstile, content-shape validation, domain blocklist, per-day rate cap)
+**Issue tracker (groomed):**
+- v1.1 spam minor (milestone 1): #31 honeypots, #32 CSRF min-age, #33 Turnstile, #34 content-shape, #44 StopForumSpam, #45 proof-of-browser (needs its own ADR: challenge delivery touches ADR-16), #60 pipeline pre-work, #61 on_spam/tag, #62 single-use tokens, #63 strict origin. Demoted: #35 domain blocklist, #36 per-day cap.
+- 2026-07-03 audit queue: #50 SMTP brute-force/conn limits (highest severity), #51 internal ops bind, #52 SMTP CRLF defense-in-depth, #53 skip-verify WARN, #54 allowlist case bug, #55 inflight bound, #56 release supply chain, #57 SMTP metrics dead code, #58 validate skips SMTP checks, #59 SMTP retry-policy divergence (spec decision)
 - QoL queue (v1.0.x or v1.1): #27 ephemeral self-signed TLS cert, #28 friendlier validation errors, #29 flatten Go module to repo root for `go install` (conflicts with ADR-2 — decide deliberately)
 - v2 platform: #4, #5, #8, #9, #21–25
 - **#30 (external, amit-tewari, 2026-05-28): sender-driven multi-tenant SMTP routing.** Challenges the roadmap's RCPT-driven framing and touches ADR-13. Treat as spec/roadmap conversation, not code.
@@ -102,7 +103,7 @@ The PRD has the canonical FR/NFR list with "must"-level requirements; the archit
 
 These derive from the spec. Do not violate without an explicit conversation that updates the spec first.
 
-1. **Sanctioned scope is shipped v1.0 plus the v1.1 spam-protection minor (issues #31–36) and the QoL queue (#27, #28).** Do not implement v2 features: SQLite storage, durable retry queue, suppression list, lifecycle webhooks, HTML body, file attachments, automatic unsubscribe injection, multi-tenant SMTP routing, multiple outputs per endpoint. v3 features (admin UI, proof-of-work, PGP) are even further out.
+1. **Sanctioned scope is shipped v1.0 plus the v1.1 spam-protection milestone ([milestone 1](https://github.com/craigmccaskill/posthorn/milestone/1): #31–34, #44, #45, pipeline pre-work #60, and the 2026-07-03 scope additions #61 on_spam/tag, #62 single-use tokens, #63 strict origin) and the QoL queue (#27, #28).** #35/#36 are demoted out of the milestone (0/5 against the observed spam corpus; re-enter on a matching real-world pattern). on_spam digest mode is explicitly deferred to v1.1.x. Do not implement v2 features: SQLite storage, durable retry queue, suppression list, lifecycle webhooks, HTML body, file attachments, automatic unsubscribe injection, multi-tenant SMTP routing, multiple outputs per endpoint. v3 features (admin UI, proof-of-work, PGP) are even further out.
 
 2. **Header injection prevention is mandatory (NFR1, NFR2, NFR22).** Submitter-controlled fields **must never** be interpolated as raw strings into email headers, at any layer. Every transport must pass the header-injection test suite (CRLF in name/email/subject/recipients, `\r\nBcc:`, header smuggling). The SMTP listener's specific NFR22 invariant: outbound recipients come from the SMTP envelope (`RCPT TO`), never from inbound MIME `To`/`Cc`/`Bcc` headers. Non-negotiable.
 
