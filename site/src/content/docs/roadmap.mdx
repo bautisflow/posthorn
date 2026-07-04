@@ -41,11 +41,11 @@ What you can do today:
 
 [Get started →](/getting-started/quick-start/)
 
-## v1.1 — spam protection
+## Spam protection
 
 [Track on GitHub →](https://github.com/craigmccaskill/posthorn/milestone/1)
 
-A focused minor release that stacks additive defenses on top of the v1.0 form-mode protections (honeypot, Origin/Referer fail-closed, rate limit, CSRF). Each item is independently shippable and backwards-compatible — existing configs keep working unchanged. No platform-shape changes, no storage layer required.
+A focused release that stacks additive defenses on top of the v1.0 form-mode protections (honeypot, Origin/Referer fail-closed, rate limit, CSRF). Each item is independently shippable and backwards-compatible — existing configs keep working unchanged. No platform-shape changes, no storage layer required. (Milestone names describe themes, not version numbers; this lands in a future minor release.)
 
 The order below reflects a concrete, validated workload: live contact-form spam against a production deployment with honeypot + Origin + rate-limit all correctly configured still lands, because form-blaster bots (Xrumer / GSA SER) render the page for a valid `Referer`, skip the empty honeypot, and trickle under the burst cap. The items that actually beat that pattern lead the release; the ones that the observed spam would have walked straight past are deprioritized.
 
@@ -95,7 +95,7 @@ The architectural shift that unlocks operating Posthorn as a real mail platform:
 
 The `Transport.Send` interface stays the synchronous primitive; the queue wraps it. v1.0 deployments keep working unchanged.
 
-## Smaller items on the queue (v1.0.x / v1.1)
+## Smaller items on the queue
 
 Operator feedback from the v1.0 launch surfaced a few quality-of-life items that don't justify a v2 wait. These ship as patch releases or a 1.1 feature bump:
 
