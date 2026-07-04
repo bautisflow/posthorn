@@ -134,16 +134,19 @@ API-mode only. A request arrived with an `Idempotency-Key` that's still in fligh
   "endpoint": "/api/contact",
   "transport": "postmark",
   "kind": "honeypot",
+  "client_ip": "203.0.113.7",
   "latency_ms": 1
 }
 ```
+
+`client_ip` is present unless the endpoint sets `strip_client_ip = true`.
 
 `kind` is one of:
 
 | `kind` | Trigger | Extra fields |
 |---|---|---|
-| `honeypot` | Honeypot field non-empty | — |
-| `origin` | Origin/Referer failed the `allowed_origins` check | `reason` (specific check that fired) |
+| `honeypot` | Honeypot field non-empty | `client_ip` |
+| `origin` | Origin/Referer failed the `allowed_origins` check | `reason` (specific check that fired), `client_ip` |
 
 The `body_too_large` case is its own event (below), not a `spam_blocked.kind`.
 
@@ -193,9 +196,12 @@ Form-mode only, when `csrf_secret` is configured. The `_csrf_token` form field w
   "endpoint": "/api/contact",
   "transport": "postmark",
   "reason": "csrf: token expired",
+  "client_ip": "203.0.113.7",
   "latency_ms": 1
 }
 ```
+
+`client_ip` is present unless the endpoint sets `strip_client_ip = true`. CSRF rejections also increment the `posthorn_spam_blocked_total` counter on `/metrics` with `kind="csrf"`.
 
 ### `validation_failed`
 

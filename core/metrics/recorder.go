@@ -137,8 +137,9 @@ func (r *Recorder) AuthFailed(endpoint string) {
 	r.authFailed.Inc(endpoint)
 }
 
-// SpamBlocked records a silent-200 spam rejection (honeypot or origin
-// check). kind is "honeypot" or "origin".
+// SpamBlocked records a spam-check rejection. kind is "honeypot",
+// "origin", or "csrf" — an operator-facing enum, never submitter
+// content (NFR24).
 func (r *Recorder) SpamBlocked(endpoint, kind string) {
 	if r == nil {
 		return

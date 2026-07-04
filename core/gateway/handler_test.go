@@ -17,6 +17,7 @@ import (
 	"github.com/craigmccaskill/posthorn/config"
 	"github.com/craigmccaskill/posthorn/csrf"
 	"github.com/craigmccaskill/posthorn/gateway"
+	"github.com/craigmccaskill/posthorn/metrics"
 	"github.com/craigmccaskill/posthorn/transport"
 )
 
@@ -2467,6 +2468,80 @@ func TestCSRF_MissingToken_403(t *testing.T) {
 	h.ServeHTTP(rec, urlencodedRequest("message=hi")) // no _csrf_token
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
+	}
+}
+
+func TestCSRF_Rejection_CountsAsSpamBlocked(t *testing.T) {
+	// A CSRF rejection must be visible on /metrics as
+	// posthorn_spam_blocked_total{kind="csrf"} — without it a
+	// CSRF-blocked flood is invisible to operators.
+	reg := metrics.New()
+	rec := metrics.NewRecorder(reg)
+	h, err := gateway.New(csrfConfig(csrfTestSecret), &recordingTransport{}, gateway.WithRecorder(rec))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h.ServeHTTP(httptest.NewRecorder(), urlencodedRequest("message=hi")) // no _csrf_token
+
+	scrape := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	want := `posthorn_spam_blocked_total{endpoint="/test",kind="csrf"} 1`
+	if !strings.Contains(scrape.Body.String(), want) {
+		t.Errorf("metrics exposition missing %q:\n%s", want, scrape.Body.String())
+	}
+}
+
+func TestCSRF_RejectionLog_HasClientIP(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	h, _ := gateway.New(csrfConfig(csrfTestSecret), &recordingTransport{}, gateway.WithLogger(logger))
+	h.ServeHTTP(httptest.NewRecorder(), urlencodedRequest("message=hi"))
+
+	out := logBuf.String()
+	if !strings.Contains(out, "csrf_rejected") {
+		t.Fatalf("csrf_rejected log line missing: %s", out)
+	}
+	if !strings.Contains(out, "client_ip") {
+		t.Errorf("client_ip missing from csrf_rejected (strip_client_ip=false default): %s", out)
+	}
+}
+
+func TestSpamBlockedLog_Honeypot_ClientIP(t *testing.T) {
+	// Forensics parity with rate_limited: the honeypot spam_blocked log
+	// line carries client_ip unless strip_client_ip is set (FR59).
+	for _, tc := range []struct {
+		name  string
+		strip bool
+	}{
+		{"default logs client_ip", false},
+		{"strip_client_ip omits it", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+			cfg := config.EndpointConfig{
+				Path:          "/test",
+				To:            []string{"to@example.com"},
+				From:          "from@example.com",
+				Subject:       "S",
+				Body:          "B",
+				Honeypot:      "_gotcha",
+				StripClientIP: tc.strip,
+			}
+			h, err := gateway.New(cfg, &recordingTransport{}, gateway.WithLogger(logger))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			h.ServeHTTP(httptest.NewRecorder(), urlencodedRequest("message=hi&_gotcha=bot"))
+
+			out := logBuf.String()
+			if !strings.Contains(out, "spam_blocked") {
+				t.Fatalf("spam_blocked log line missing: %s", out)
+			}
+			if got := strings.Contains(out, "client_ip"); got == tc.strip {
+				t.Errorf("client_ip presence = %v, want %v: %s", got, !tc.strip, out)
+			}
+		})
 	}
 }
 

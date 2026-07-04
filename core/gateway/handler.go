@@ -372,11 +372,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if len(h.cfg.AllowedOrigins) > 0 {
 			origin, referer := spam.ExtractOriginAndReferer(r)
 			if result, reason := spam.CheckOrigin(origin, referer, h.cfg.AllowedOrigins); result == spam.HardReject {
-				logger.Info("spam_blocked",
+				attrs := []any{
 					slog.String("kind", "origin"),
 					slog.String("reason", reason),
 					slog.Int64("latency_ms", time.Since(start).Milliseconds()),
-				)
+				}
+				if !h.cfg.StripClientIP {
+					// Operator forensics parity with rate_limited —
+					// unless strip_client_ip is set (FR59 GDPR option).
+					attrs = append(attrs, slog.String("client_ip", ratelimit.ClientIP(r, h.trustedProxies)))
+				}
+				logger.Info("spam_blocked", attrs...)
 				h.recorder.SpamBlocked(h.cfg.Path, "origin")
 				h.writeErrorResponse(w, r, http.StatusForbidden, "forbidden")
 				return
@@ -471,10 +477,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// not be able to tell the two paths apart. Form mode only — API
 	// mode is authenticated and has no browser bots.
 	if !apiMode && spam.CheckHoneypot(r.Form, h.cfg.Honeypot) == spam.SilentReject {
-		logger.Info("spam_blocked",
+		attrs := []any{
 			slog.String("kind", "honeypot"),
 			slog.Int64("latency_ms", time.Since(start).Milliseconds()),
-		)
+		}
+		if !h.cfg.StripClientIP {
+			// rateLimitKey is the client IP in form mode (set above);
+			// logged for operator forensics, parity with rate_limited.
+			attrs = append(attrs, slog.String("client_ip", rateLimitKey))
+		}
+		logger.Info("spam_blocked", attrs...)
 		h.recorder.SpamBlocked(h.cfg.Path, "honeypot")
 		h.writeSuccessResponse(w, r, response.Success{
 			Status:       "ok",
@@ -490,10 +502,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !apiMode && h.cfg.CSRFSecret != "" {
 		token := r.Form.Get(csrf.TokenField)
 		if err := csrf.Verify(token, []byte(h.cfg.CSRFSecret), h.csrfTokenTTL, time.Now()); err != nil {
-			logger.Info("csrf_rejected",
+			attrs := []any{
 				slog.String("reason", err.Error()),
 				slog.Int64("latency_ms", time.Since(start).Milliseconds()),
-			)
+			}
+			if !h.cfg.StripClientIP {
+				attrs = append(attrs, slog.String("client_ip", rateLimitKey))
+			}
+			logger.Info("csrf_rejected", attrs...)
+			// CSRF rejections count as spam blocks on /metrics — without
+			// this a CSRF-blocked flood is invisible to operators.
+			h.recorder.SpamBlocked(h.cfg.Path, "csrf")
 			h.writeErrorResponse(w, r, http.StatusForbidden, "forbidden")
 			return
 		}
