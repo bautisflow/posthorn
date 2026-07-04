@@ -1,0 +1,71 @@
+name: Integration (live)
+
+# Live-provider validation (issue #76). This is the ONLY workflow that
+# touches real provider credentials, so it is fenced off from untrusted
+# code:
+#   - It never runs on `pull_request` (fork PRs can't reach it, and GitHub
+#     withholds secrets from them anyway). The hermetic e2e suite already
+#     runs on every PR via ci.yml's `go test ./...`.
+#   - It runs only on manual dispatch or a weekly schedule, only on the
+#     canonical repo, and behind the protected `live-providers`
+#     Environment (add a required reviewer there so even a compromised
+#     main can't send without a human click).
+#
+# Credentials, per provider:
+#   - Postmark: the PUBLIC `POSTMARK_API_TEST` token, hard-coded in the
+#     test. No secret — always runs, proving the live harness works.
+#   - AWS SES: GitHub OIDC → STS role (no stored long-lived key). Set repo
+#     variable AWS_ROLE_ARN to enable; otherwise the SES test skips.
+#   - Mailgun / Resend: environment secrets. Absent → those tests skip.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1' # Mondays 06:17 UTC
+
+permissions:
+  contents: read
+  id-token: write # SES OIDC → STS; harmless when AWS_ROLE_ARN is unset
+
+concurrency:
+  group: integration-live
+  cancel-in-progress: false
+
+jobs:
+  live:
+    # Never run on forks — they have neither the secrets nor the trust.
+    if: github.repository == 'craigmccaskill/posthorn'
+    runs-on: ubuntu-latest
+    environment: live-providers # protect with a required reviewer in repo settings
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: core/go.mod
+
+      # SES only: assume the OIDC role if one is configured. The action
+      # exports short-lived AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+      # AWS_SESSION_TOKEN — nothing long-lived is stored anywhere.
+      - name: Configure AWS credentials (OIDC)
+        if: vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Live provider tests
+        env:
+          # Present → the matching provider's test runs; absent → it skips.
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          MAILGUN_API_KEY: ${{ secrets.MAILGUN_API_KEY }}
+          MAILGUN_DOMAIN: ${{ vars.MAILGUN_DOMAIN }}
+          POSTHORN_TEST_FROM: ${{ vars.POSTHORN_TEST_FROM }}
+          POSTHORN_TEST_TO: ${{ vars.POSTHORN_TEST_TO }}
+        run: go test -tags integration -race -count=1 -v -timeout=5m ./providertest/...
