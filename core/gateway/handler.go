@@ -72,7 +72,21 @@ type Handler struct {
 	csrfTokenTTL         time.Duration // resolved at construction (cfg.CSRFTokenTTL or default)
 	logger               *slog.Logger
 	recorder             *metrics.Recorder // nil = no-op (default)
+
+	// Spam-check pipeline, built once from config (form mode only). Header
+	// checks run pre-parse/pre-rate-limit (origin, ...); form checks run
+	// post-parse (honeypot, csrf, ...). Each returns a spam.Verdict the
+	// handler renders through one mapping (applySpamVerdict), so adding a
+	// check is a new builder entry, not another inline block in ServeHTTP.
+	headerChecks []headerCheck
+	formChecks   []formCheck
 }
+
+// headerCheck inspects the request before the body is parsed (headers, IP).
+type headerCheck func(*http.Request) spam.Verdict
+
+// formCheck inspects the parsed form after the body is read.
+type formCheck func(url.Values) spam.Verdict
 
 // defaultAuthFailureBudget caps brute-force attempts against api-mode
 // endpoints. Token bucket per client IP: defaultAuthFailureBudget tokens
@@ -225,11 +239,96 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 		logFailedSubmissions: logFailed,
 		csrfTokenTTL:         csrfTTL,
 		logger:               log.Discard(), // overridable via WithLogger
+		headerChecks:         buildHeaderChecks(cfg),
+		formChecks:           buildFormChecks(cfg, csrfTTL),
 	}
 	for _, opt := range opts {
 		opt(h)
 	}
 	return h, nil
+}
+
+// buildHeaderChecks assembles the pre-parse spam checks from config. Each
+// entry closes over its config so ServeHTTP just iterates. Form-mode
+// fields (allowed_origins) are empty on api-mode endpoints (rejected at
+// parse per ADR-10), so this returns nil there.
+func buildHeaderChecks(cfg config.EndpointConfig) []headerCheck {
+	var checks []headerCheck
+	if len(cfg.AllowedOrigins) > 0 {
+		allowed := cfg.AllowedOrigins
+		checks = append(checks, func(r *http.Request) spam.Verdict {
+			origin, referer := spam.ExtractOriginAndReferer(r)
+			if result, reason := spam.CheckOrigin(origin, referer, allowed); result == spam.HardReject {
+				v := spam.Blocks("origin")
+				v.Reason = reason
+				return v
+			}
+			return spam.Verdict{}
+		})
+	}
+	return checks
+}
+
+// buildFormChecks assembles the post-parse spam checks from config.
+func buildFormChecks(cfg config.EndpointConfig, csrfTTL time.Duration) []formCheck {
+	var checks []formCheck
+	if cfg.Honeypot != "" {
+		field := cfg.Honeypot
+		checks = append(checks, func(form url.Values) spam.Verdict {
+			if spam.CheckHoneypot(form, field) == spam.SilentReject {
+				// Silent 200 so a bot can't tell rejection from success.
+				return spam.Verdict{Blocked: true, Silent: true, Kind: "honeypot"}
+			}
+			return spam.Verdict{}
+		})
+	}
+	if cfg.CSRFSecret != "" {
+		secret := []byte(cfg.CSRFSecret)
+		checks = append(checks, func(form url.Values) spam.Verdict {
+			token := form.Get(csrf.TokenField)
+			if err := csrf.Verify(token, secret, csrfTTL, time.Now()); err != nil {
+				return spam.Verdict{Blocked: true, Kind: "csrf", Event: "csrf_rejected", Reason: err.Error()}
+			}
+			return spam.Verdict{}
+		})
+	}
+	return checks
+}
+
+// applySpamVerdict renders a blocking Verdict as the log line, metric, and
+// HTTP response, and reports whether it handled the request. A passing
+// verdict returns false so ServeHTTP continues. This is the single mapping
+// every spam check flows through.
+func (h *Handler) applySpamVerdict(w http.ResponseWriter, r *http.Request, logger *slog.Logger, v spam.Verdict, clientIP, submissionID string, start time.Time) bool {
+	if !v.Blocked {
+		return false
+	}
+	event := v.Event
+	if event == "" {
+		event = "spam_blocked"
+	}
+	attrs := []any{slog.String("kind", v.Kind)}
+	if v.Reason != "" {
+		attrs = append(attrs, slog.String("reason", v.Reason))
+	}
+	attrs = append(attrs, slog.Int64("latency_ms", time.Since(start).Milliseconds()))
+	if !h.cfg.StripClientIP && clientIP != "" {
+		// Operator forensics parity with rate_limited (FR59 opt-out).
+		attrs = append(attrs, slog.String("client_ip", clientIP))
+	}
+	logger.Info(event, attrs...)
+	h.recorder.SpamBlocked(h.cfg.Path, v.Kind)
+
+	if v.Silent {
+		h.writeSuccessResponse(w, r, response.Success{Status: "ok", SubmissionID: submissionID})
+	} else {
+		status := v.Status
+		if status == 0 {
+			status = http.StatusForbidden
+		}
+		h.writeErrorResponse(w, r, status, "forbidden")
+	}
+	return true
 }
 
 // ServeHTTP implements [net/http.Handler].
@@ -358,29 +457,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Origin/Referer check (FR6, NFR4). Form-mode only; API mode is
-		// authenticated so browser CORS defenses do not apply.
-		if len(h.cfg.AllowedOrigins) > 0 {
-			origin, referer := spam.ExtractOriginAndReferer(r)
-			if result, reason := spam.CheckOrigin(origin, referer, h.cfg.AllowedOrigins); result == spam.HardReject {
-				attrs := []any{
-					slog.String("kind", "origin"),
-					slog.String("reason", reason),
-					slog.Int64("latency_ms", time.Since(start).Milliseconds()),
-				}
-				if !h.cfg.StripClientIP {
-					// Operator forensics parity with rate_limited —
-					// unless strip_client_ip is set (FR59 GDPR option).
-					attrs = append(attrs, slog.String("client_ip", ratelimit.ClientIP(r, h.trustedProxies)))
-				}
-				logger.Info("spam_blocked", attrs...)
-				h.recorder.SpamBlocked(h.cfg.Path, "origin")
-				h.writeErrorResponse(w, r, http.StatusForbidden, "forbidden")
+		// Resolve the client IP once: it keys the rate limiter (form mode)
+		// and is the forensics field on every spam-check log line.
+		rateLimitKey = ratelimit.ClientIP(r, h.trustedProxies)
+
+		// Header-phase spam checks (FR6, NFR4). Run before the rate limiter
+		// so a rejection doesn't consume a token. Origin/Referer today;
+		// the pipeline holds any future header/IP checks.
+		for _, check := range h.headerChecks {
+			if h.applySpamVerdict(w, r, logger, check(r), rateLimitKey, submissionID, start) {
 				return
 			}
 		}
-
-		rateLimitKey = ratelimit.ClientIP(r, h.trustedProxies)
 	}
 
 	// Rate limit check (FR8). Bucket key differs by mode (set above).
@@ -467,45 +555,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// for the same reason: an observant bot inspecting the body must
 	// not be able to tell the two paths apart. Form mode only — API
 	// mode is authenticated and has no browser bots.
-	if !apiMode && spam.CheckHoneypot(r.Form, h.cfg.Honeypot) == spam.SilentReject {
-		attrs := []any{
-			slog.String("kind", "honeypot"),
-			slog.Int64("latency_ms", time.Since(start).Milliseconds()),
-		}
-		if !h.cfg.StripClientIP {
-			// rateLimitKey is the client IP in form mode (set above);
-			// logged for operator forensics, parity with rate_limited.
-			attrs = append(attrs, slog.String("client_ip", rateLimitKey))
-		}
-		logger.Info("spam_blocked", attrs...)
-		h.recorder.SpamBlocked(h.cfg.Path, "honeypot")
-		h.writeSuccessResponse(w, r, response.Success{
-			Status:       "ok",
-			SubmissionID: submissionID,
-		})
-		return
-	}
-
-	// FR57: CSRF check (form-mode only). When csrf_secret is configured,
-	// every submission must carry a verifiable _csrf_token form field.
-	// Failures return 403 with no detail — the structured log line has
-	// the operator-facing reason.
-	if !apiMode && h.cfg.CSRFSecret != "" {
-		token := r.Form.Get(csrf.TokenField)
-		if err := csrf.Verify(token, []byte(h.cfg.CSRFSecret), h.csrfTokenTTL, time.Now()); err != nil {
-			attrs := []any{
-				slog.String("reason", err.Error()),
-				slog.Int64("latency_ms", time.Since(start).Milliseconds()),
+	// Form-phase spam checks (form mode only): honeypot (silent 200) and
+	// CSRF (403, logged as csrf_rejected), plus any future post-parse
+	// checks (content-shape, reputation, captcha). Each flows through the
+	// same verdict mapping.
+	if !apiMode {
+		for _, check := range h.formChecks {
+			if h.applySpamVerdict(w, r, logger, check(r.Form), rateLimitKey, submissionID, start) {
+				return
 			}
-			if !h.cfg.StripClientIP {
-				attrs = append(attrs, slog.String("client_ip", rateLimitKey))
-			}
-			logger.Info("csrf_rejected", attrs...)
-			// CSRF rejections count as spam blocks on /metrics — without
-			// this a CSRF-blocked flood is invisible to operators.
-			h.recorder.SpamBlocked(h.cfg.Path, "csrf")
-			h.writeErrorResponse(w, r, http.StatusForbidden, "forbidden")
-			return
 		}
 	}
 
