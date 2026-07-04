@@ -234,6 +234,10 @@ func (l *Listener) handleConnection(conn net.Conn) {
 	// so well-behaved clients back off and retry.
 	remoteIP := remoteIPOf(conn)
 	if !l.acquireConnSlot(remoteIP) {
+		// Bound the refusal write: a zero-window client under exactly the
+		// flood this cap defends against must not block this goroutine
+		// (it is counted in l.wg, so a hang would stall Stop's drain).
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		_, _ = conn.Write([]byte("421 4.7.0 Too many connections, try again later\r\n"))
 		l.logger.Info("smtp_connection_refused",
 			slog.String("remote_ip", remoteIP),
