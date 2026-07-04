@@ -122,6 +122,7 @@ Comentario IS dynamic — it runs as a container on the same Docker host as Post
    listen          = ":2525"
    auth_required   = "none"
    require_tls     = false
+   trusted_network = true             # required with auth "none": asserts the Docker network (no ports: exposure) is the trust boundary
    allowed_senders = ["*@example.com"]
    max_recipients_per_session = 10
    max_message_size = "1MB"

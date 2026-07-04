@@ -35,9 +35,10 @@ const (
 	// allowlist + recipient cap remain in force as the only gates.
 	// Only safe when the listener is bound to a private network
 	// (Docker bridge, loopback) where network access already implies
-	// trust. The validator refuses to combine AuthNone with a public
-	// bind address only by convention — exposing a bare-listener
-	// publicly is the operator's responsibility to avoid.
+	// trust. The config-package validator refuses AuthNone on a bind
+	// address it cannot verify as private unless the operator sets
+	// trusted_network = true (#41) — enforced at parse time, so both
+	// `posthorn validate` and `serve` catch it.
 	AuthNone AuthMode = "none"
 )
 
@@ -100,9 +101,33 @@ type ListenerConfig struct {
 	// IdleTimeout closes a connection idle this long. Default 60s.
 	IdleTimeout config.Duration `toml:"idle_timeout"`
 
+	// MaxConnections caps concurrent connections across all clients;
+	// MaxConnectionsPerIP caps them per remote IP (#50). 0 = defaults
+	// via the Effective helpers. Excess connections get 421 and close.
+	MaxConnections      int `toml:"max_connections"`
+	MaxConnectionsPerIP int `toml:"max_connections_per_ip"`
+
 	// Transport is the outbound transport block — same shape as
 	// [endpoints.transport] (FR68).
 	Transport config.TransportConfig `toml:"transport"`
+}
+
+// EffectiveMaxConnections resolves the global concurrent-connection cap
+// (default 100).
+func (c *ListenerConfig) EffectiveMaxConnections() int {
+	if c.MaxConnections <= 0 {
+		return 100
+	}
+	return c.MaxConnections
+}
+
+// EffectiveMaxConnectionsPerIP resolves the per-IP concurrent-connection
+// cap (default 16).
+func (c *ListenerConfig) EffectiveMaxConnectionsPerIP() int {
+	if c.MaxConnectionsPerIP <= 0 {
+		return 16
+	}
+	return c.MaxConnectionsPerIP
 }
 
 // Validate runs parse-time checks on the listener config. Returns the

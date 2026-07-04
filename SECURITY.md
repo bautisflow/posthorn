@@ -61,7 +61,8 @@ These are real vulnerabilities and we want to hear about them.
 **SMTP listener**
 
 - **MIME-header recipient smuggling** (NFR22) — a way to make a recipient address in inbound MIME `To:`/`Cc:`/`Bcc:` headers end up as an outbound `RCPT TO`. Recipients must come from the SMTP envelope only.
-- **Sender allowlist bypass** (FR64) — a way to authenticate (or in `auth = "none"` mode, connect from outside the trust zone) and emit mail with a `MAIL FROM` not on the `allowed_senders` list
+- **Sender allowlist bypass** (FR64) — a way to authenticate (or in `auth = "none"` mode, connect from outside the trust zone) and emit mail with a `MAIL FROM` not on the `allowed_senders` list. The trust zone is enforced at config-parse time: `auth_required = "none"` refuses a bind address that isn't verifiably loopback/private unless the operator sets `trusted_network = true` (#41).
+- **AUTH brute-force / connection exhaustion** (#50) — a way to guess SMTP credentials past the per-IP failure budget (10/min, then 421 + close), or to hold more concurrent connections than the global / per-IP caps allow
 - **AUTH PLAIN credential leakage** (NFR23) — a way to make a `smtp_users[*].password` value appear in log output on auth failure
 - **STARTTLS bypass / downgrade** (FR67) — a way to issue `AUTH` or `MAIL` on a plaintext connection when `require_tls = true`
 

@@ -9,7 +9,9 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/mail"
+	"net/netip"
 	"os"
 	"regexp"
 	"strings"
@@ -53,6 +55,20 @@ type SMTPListenerConfig struct {
 	MaxMessageSize          string              `toml:"max_message_size"`
 	IdleTimeout             Duration            `toml:"idle_timeout"`
 	Transport               TransportConfig     `toml:"transport"`
+
+	// TrustedNetwork acknowledges that an auth_required = "none"
+	// listener bound to a non-loopback/non-private address is reachable
+	// only from a trusted network (Docker bridge with no port exposure,
+	// VPN, firewall). Without it, that combination is a parse error —
+	// an unauthenticated listener on a public bind is an open relay
+	// gated only by the sender allowlist (#41).
+	TrustedNetwork bool `toml:"trusted_network"`
+
+	// MaxConnections caps concurrent SMTP connections across all
+	// clients; MaxConnectionsPerIP caps them per remote IP (#50).
+	// 0 = defaults (100 / 16). Excess connections get 421 and close.
+	MaxConnections      int `toml:"max_connections"`
+	MaxConnectionsPerIP int `toml:"max_connections_per_ip"`
 }
 
 // SMTPUser is a single AUTH PLAIN credential pair.
@@ -297,7 +313,53 @@ func (s *SMTPListenerConfig) Validate() error {
 	if s.IdleTimeout.Std() < 0 {
 		return fmt.Errorf("idle_timeout: must be non-negative, got %v", s.IdleTimeout.Std())
 	}
+	if s.MaxConnections < 0 {
+		return fmt.Errorf("max_connections: must be non-negative, got %d", s.MaxConnections)
+	}
+	if s.MaxConnectionsPerIP < 0 {
+		return fmt.Errorf("max_connections_per_ip: must be non-negative, got %d", s.MaxConnectionsPerIP)
+	}
+	// #41: with auth_required = "none" the sender allowlist is the only
+	// gate, so refuse a bind address we can't verify as private unless
+	// the operator explicitly asserts the network is trusted. Fail-closed
+	// at parse time per the ADR-10 footgun philosophy: better a startup
+	// error with a fix in it than a silently open relay.
+	if s.AuthRequired == "none" && !s.TrustedNetwork {
+		if err := validatePrivateBind(s.Listen); err != nil {
+			return fmt.Errorf("auth_required = \"none\": %w — bind to a loopback/private address, require auth, or set trusted_network = true if the listener is reachable only from a trusted network (Docker bridge with no port exposure, VPN, firewall)", err)
+		}
+	}
 	return nil
+}
+
+// validatePrivateBind returns an error when the listen address is not
+// verifiably private: empty host / unspecified IP (binds all
+// interfaces), a public IP, or a hostname we can't classify. Loopback,
+// RFC1918/ULA-private, and link-local addresses pass, as does the
+// literal "localhost".
+func validatePrivateBind(listen string) error {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("listen %q: %v", listen, err)
+	}
+	if host == "" {
+		return fmt.Errorf("listen %q binds all interfaces", listen)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		// A hostname we can't classify without resolving — fail closed.
+		return fmt.Errorf("listen host %q is not an IP address; cannot verify it is private", host)
+	}
+	if ip.IsUnspecified() {
+		return fmt.Errorf("listen %q binds all interfaces", listen)
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		return nil
+	}
+	return fmt.Errorf("listen address %q is public", host)
 }
 
 // EffectiveRequireTLS resolves the *bool RequireTLS to a concrete value.

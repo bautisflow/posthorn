@@ -181,6 +181,8 @@ func buildSMTPIngress(c *config.SMTPListenerConfig, logger *slog.Logger) (ingres
 		AllowedSenders:          c.AllowedSenders,
 		AllowedRecipients:       c.AllowedRecipients,
 		MaxRecipientsPerSession: c.MaxRecipientsPerSession,
+		MaxConnections:          c.MaxConnections,
+		MaxConnectionsPerIP:     c.MaxConnectionsPerIP,
 		MaxMessageSize:          rawSize,
 		IdleTimeout:             c.IdleTimeout,
 		Transport:               c.Transport,

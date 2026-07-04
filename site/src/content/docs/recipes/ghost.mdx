@@ -129,6 +129,7 @@ Ghost's web UI is reachable via your reverse proxy (loopback-bound). Ghost's out
    listen          = ":2525"
    auth_required   = "none"
    require_tls     = false
+   trusted_network = true             # required with auth "none": asserts the Docker network (no ports: exposure) is the trust boundary
    allowed_senders = ["*@example.com"]
    max_recipients_per_session = 50    # higher than default; newsletter sends batch
    max_message_size = "10MB"          # bigger than default; newsletters embed images
