@@ -7,7 +7,11 @@
 #           posthorn:local
 
 # --- Stage 1: build the static binary ----------------------------------
-FROM golang:1.25-alpine AS builder
+# Base images pinned by manifest-list digest (#39) so a tag repoint
+# upstream can't silently change what we build from. Dependabot keeps
+# the digests fresh (.github/dependabot.yml); the tag comment is for
+# humans.
+FROM golang:1.25-alpine@sha256:523c3effe300580ed375e43f43b1c9b091b68e935a7c3a92bfcc4e7ed55b18c2 AS builder
 
 ARG VERSION=dev
 ARG TARGETOS=linux
@@ -39,7 +43,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
         ./cmd/posthorn
 
 # --- Stage 2: minimal runtime ------------------------------------------
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240
 
 LABEL org.opencontainers.image.title="Posthorn" \
       org.opencontainers.image.description="The unified outbound mail layer for self-hosted projects" \

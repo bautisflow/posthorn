@@ -145,7 +145,7 @@ func (p *PostmarkTransport) Send(ctx context.Context, msg Message) (SendResult, 
 			Message: "postmark request failed",
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, postmarkResponseSizeLimit))
 

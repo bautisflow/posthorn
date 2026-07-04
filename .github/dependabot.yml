@@ -1,0 +1,19 @@
+# Keeps the digest-pinned base images (#39), Go module deps, and GitHub
+# Actions versions fresh via weekly PRs.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /core
+    schedule:
+      interval: weekly
+    # Digest pins update in place; the tag comment stays for humans.
+
+  - package-ecosystem: gomod
+    directory: /core
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

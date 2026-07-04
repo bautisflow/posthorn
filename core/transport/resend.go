@@ -133,7 +133,7 @@ func (r *ResendTransport) Send(ctx context.Context, msg Message) (SendResult, er
 			Message: "resend request failed",
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, resendResponseSizeLimit))
 

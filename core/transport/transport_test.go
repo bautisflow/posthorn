@@ -169,7 +169,7 @@ func TestTransportError_Unwrap(t *testing.T) {
 		t.Error("errors.Is(err, cause) = false, want true")
 	}
 
-	var unwrapped error = err.Unwrap()
+	unwrapped := err.Unwrap()
 	if unwrapped != cause {
 		t.Errorf("Unwrap() = %v, want %v", unwrapped, cause)
 	}

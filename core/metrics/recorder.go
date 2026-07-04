@@ -18,15 +18,15 @@ var LatencyBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10}
 // without an enabling-condition check; tests that don't care about
 // metrics pass nil.
 type Recorder struct {
-	submitted      *Counter
-	sent           *Counter
-	failed         *Counter
-	rateLimited    *Counter
-	authFailed     *Counter
-	spamBlocked    *Counter
+	submitted        *Counter
+	sent             *Counter
+	failed           *Counter
+	rateLimited      *Counter
+	authFailed       *Counter
+	spamBlocked      *Counter
 	validationFailed *Counter
 	idempotentReplay *Counter
-	sendLatency    *Histogram
+	sendLatency      *Histogram
 }
 
 // NewRecorder constructs a Recorder backed by counters and histograms

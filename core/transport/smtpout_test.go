@@ -85,7 +85,7 @@ func (s *fakeSMTPServer) acceptLoop() {
 }
 
 func (s *fakeSMTPServer) handle(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	session := &fakeSession{}
 	s.mu.Lock()
 	s.Sessions = append(s.Sessions, session)
@@ -472,8 +472,8 @@ func TestSMTPOut_HeaderInjection(t *testing.T) {
 			Subject: "s", BodyText: "b",
 		}},
 		{"crlf_in_to_recipient", Message{
-			From: "f@example.com",
-			To:   []string{"r@example.com\r\nBcc: victim@target.com"},
+			From:    "f@example.com",
+			To:      []string{"r@example.com\r\nBcc: victim@target.com"},
 			Subject: "s", BodyText: "b",
 		}},
 	}

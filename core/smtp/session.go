@@ -39,16 +39,16 @@ var sendTimeout = 10 * time.Second
 // Invalid command sequences return 503 5.5.1 "Bad sequence of commands"
 // without leaving the current state.
 type session struct {
-	l       *Listener
-	conn    net.Conn
-	tp      *textproto.Conn
-	logger  *slog.Logger
-	id      string
+	l      *Listener
+	conn   net.Conn
+	tp     *textproto.Conn
+	logger *slog.Logger
+	id     string
 
 	// Negotiated state.
-	tlsActive       bool
-	authedUser      string // empty until auth completes
-	authedViaCert   bool
+	tlsActive     bool
+	authedUser    string // empty until auth completes
+	authedViaCert bool
 
 	// Per-transaction state. Resets on RSET, MAIL FROM, or after
 	// successful DATA.

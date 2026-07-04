@@ -25,10 +25,10 @@ import (
 // signature is opaque material, not user input.
 
 const (
-	sesServiceName        = "ses"
-	sesSendPath           = "/v2/email/outbound-emails"
-	sesRequestTimeout     = 5 * time.Second
-	sesResponseSizeLimit  = 64 * 1024
+	sesServiceName       = "ses"
+	sesSendPath          = "/v2/email/outbound-emails"
+	sesRequestTimeout    = 5 * time.Second
+	sesResponseSizeLimit = 64 * 1024
 )
 
 var sesHTTPClient = &http.Client{
@@ -159,7 +159,7 @@ func (s *SESTransport) Send(ctx context.Context, msg Message) (SendResult, error
 			Message: "ses request failed",
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, sesResponseSizeLimit))
 
