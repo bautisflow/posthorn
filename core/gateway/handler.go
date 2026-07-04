@@ -46,22 +46,12 @@ const defaultEmailField = "email"
 // overridable — see ADR-11 for the safety reasoning.
 const toOverrideField = "to_override"
 
-// Retry timing — declared as vars so tests can override without
-// waiting full real-time delays. Production never mutates these.
-var (
-	// requestTimeout is the hard upper bound on a single submission's
-	// processing time, including any retries (FR22).
-	requestTimeout = 10 * time.Second
-
-	// transientRetryDelay is how long the handler waits before retrying
-	// a transient transport failure (FR19).
-	transientRetryDelay = 1 * time.Second
-
-	// rateLimitedRetryDelay is how long the handler waits before retrying
-	// a 429 from the upstream provider (FR20). Longer than transient
-	// because the upstream is asking us to slow down.
-	rateLimitedRetryDelay = 5 * time.Second
-)
+// requestTimeout is the hard upper bound on a single submission's
+// processing time, including any retries (FR22). Declared as a var so
+// tests can override; production never mutates it. The retry delays
+// themselves live in the transport package (transport.SendWithRetry),
+// shared with the SMTP ingress per issue #59.
+var requestTimeout = 10 * time.Second
 
 // Handler accepts form submissions and forwards them via a Transport.
 //
@@ -637,7 +627,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
 
-	result, err := sendWithRetry(ctx, h.transport, msg, logger)
+	result, err := transport.SendWithRetry(ctx, h.transport, msg, logger)
 	if err != nil {
 		// Terminal failure — log payload (or just metadata if operator
 		// disabled it) so operators can recover from logs (FR16).
@@ -825,64 +815,6 @@ func (h *Handler) authenticateAPIRequest(r *http.Request) (string, bool) {
 		}
 	}
 	return matched, matched != ""
-}
-
-// sendWithRetry implements the FR19-22 retry policy:
-//
-//   - On *transport.TransportError with class ErrTransient: wait 1s, retry once.
-//   - On *transport.TransportError with class ErrRateLimited: wait 5s, retry once.
-//   - On any class ErrTerminal (or non-TransportError): no retry.
-//   - The provided ctx carries the 10s request hard timeout (FR22);
-//     if it expires during the backoff, the second attempt is skipped.
-//
-// Returns the transport result and nil on success, or a zero result and the
-// most recent TransportError on failure.
-func sendWithRetry(ctx context.Context, t transport.Transport, msg transport.Message, logger *slog.Logger) (transport.SendResult, error) {
-	result, err := t.Send(ctx, msg)
-	if err == nil {
-		return result, nil
-	}
-
-	var te *transport.TransportError
-	if !errors.As(err, &te) {
-		// Non-TransportError — caller contract violation; treat as terminal.
-		return transport.SendResult{}, err
-	}
-
-	var delay time.Duration
-	switch te.Class {
-	case transport.ErrTransient:
-		delay = transientRetryDelay
-	case transport.ErrRateLimited:
-		delay = rateLimitedRetryDelay
-	default:
-		// ErrTerminal, ErrUnknown — no retry.
-		return transport.SendResult{}, err
-	}
-
-	logger.Info("send_retry_scheduled",
-		slog.String("class", te.Class.String()),
-		slog.Int("status", te.Status),
-		slog.Duration("delay", delay),
-	)
-
-	select {
-	case <-ctx.Done():
-		// Hit the 10s hard timeout before we could retry. Surface the
-		// original error.
-		return transport.SendResult{}, err
-	case <-time.After(delay):
-	}
-
-	retryResult, retryErr := t.Send(ctx, msg)
-	if retryErr == nil {
-		logger.Info("send_retry_succeeded")
-		return retryResult, nil
-	}
-	logger.Info("send_retry_failed",
-		slog.String("error", retryErr.Error()),
-	)
-	return transport.SendResult{}, retryErr
 }
 
 // redactedForm returns a copy of the form with the honeypot field

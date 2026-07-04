@@ -1,20 +1,26 @@
 package gateway
 
-import "time"
+import (
+	"time"
 
-// SetRetryDelaysForTest swaps the package-level retry/timeout variables
-// to short values for tests, returning a function that restores them.
+	"github.com/craigmccaskill/posthorn/transport"
+)
+
+// SetRetryDelaysForTest swaps the retry/timeout variables to short
+// values for tests, returning a function that restores them. The retry
+// delays live in the transport package since the FR19-22 policy moved
+// to transport.SendWithRetry (issue #59); requestTimeout stays here.
 //
 // Compiled only with _test.go files. External (gateway_test package)
 // tests use this rather than reaching into unexported state directly.
 func SetRetryDelaysForTest(transient, rateLimited, requestTO time.Duration) func() {
-	oldT, oldR, oldTo := transientRetryDelay, rateLimitedRetryDelay, requestTimeout
-	transientRetryDelay = transient
-	rateLimitedRetryDelay = rateLimited
+	oldT, oldR, oldTo := transport.TransientRetryDelay, transport.RateLimitedRetryDelay, requestTimeout
+	transport.TransientRetryDelay = transient
+	transport.RateLimitedRetryDelay = rateLimited
 	requestTimeout = requestTO
 	return func() {
-		transientRetryDelay = oldT
-		rateLimitedRetryDelay = oldR
+		transport.TransientRetryDelay = oldT
+		transport.RateLimitedRetryDelay = oldR
 		requestTimeout = oldTo
 	}
 }
