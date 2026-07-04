@@ -2441,6 +2441,47 @@ func csrfConfig(secret string) config.EndpointConfig {
 
 const csrfTestSecret = "0123456789abcdef0123456789abcdef" // 32 bytes
 
+// TestSpamPipeline_FormChecks_Order verifies the extracted pipeline runs
+// form checks in order and short-circuits on the first block: with both a
+// honeypot and CSRF configured, a filled honeypot returns the silent 200
+// before CSRF is ever evaluated (so a missing token doesn't turn it into a
+// 403). Locks in the one new behavior the pipeline introduces over the
+// former inline blocks.
+func TestSpamPipeline_FormChecks_Order(t *testing.T) {
+	cfg := config.EndpointConfig{
+		Path:       "/test",
+		To:         []string{"to@example.com"},
+		From:       "from@example.com",
+		Subject:    "S",
+		Body:       "B",
+		Honeypot:   "_gotcha",
+		CSRFSecret: csrfTestSecret,
+	}
+	rt := &recordingTransport{}
+	h, err := gateway.New(cfg, rt)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Honeypot filled AND no CSRF token. Honeypot runs first → silent 200,
+	// no mail, CSRF never reached.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest("message=hi&_gotcha=bot"))
+	if rec.Code != http.StatusOK {
+		t.Errorf("honeypot-first: status = %d, want 200 (silent)", rec.Code)
+	}
+	if len(rt.sent) != 0 {
+		t.Errorf("honeypot silent-reject still sent %d messages", len(rt.sent))
+	}
+
+	// Honeypot empty, CSRF token missing → CSRF blocks with 403.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest("message=hi"))
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("csrf-missing: status = %d, want 403", rec.Code)
+	}
+}
+
 func TestCSRF_ValidToken_Succeeds(t *testing.T) {
 	rt := &recordingTransport{}
 	cfg := csrfConfig(csrfTestSecret)
