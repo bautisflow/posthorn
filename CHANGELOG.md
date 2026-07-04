@@ -7,24 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [1.1.0] — 2026-07-04
+
+A security-hardening and operational-maturity release, from a full audit of the shipped v1.0. One breaking change (below) that closes an open-relay footgun; everything else is additive or a fix.
+
 ### Breaking
 
-- **`auth_required = "none"` on a public bind is now refused at config-parse time (#41).** An SMTP listener with `auth_required = "none"` whose `listen` address is not verifiably loopback/private (e.g. `:2525`, `0.0.0.0:2525`, a public IP, or an unresolvable hostname) is a startup error. Set `trusted_network = true` to assert the listener is reachable only from a trusted network — a Docker bridge with no `ports:` exposure, a VPN, or a firewall. **Migration:** deployments built from the pre-existing Ghost / Gitea / internal-relay recipes used `auth_required = "none"` with `listen = ":2525"` and must add `trusted_network = true` (the updated recipes include it). This closes the open-relay footgun where the sender allowlist was the only gate on an unauthenticated public listener.
+- **`auth_required = "none"` on a public bind is now refused at config-parse time ([#41](https://github.com/craigmccaskill/posthorn/issues/41)).** An SMTP listener with `auth_required = "none"` whose `listen` address is not verifiably loopback/private (e.g. `:2525`, `0.0.0.0:2525`, a public IP, or an unresolvable hostname) is a startup error. Set `trusted_network = true` to assert the listener is reachable only from a trusted network — a Docker bridge with no `ports:` exposure, a VPN, or a firewall. **Migration:** deployments built from the pre-existing Ghost / Gitea / internal-relay recipes used `auth_required = "none"` with `listen = ":2525"` and must add `trusted_network = true` (the updated recipes include it). This closes the open-relay footgun where the sender allowlist was the only gate on an unauthenticated public listener.
 
 ### Added
 
-- **SMTP listener brute-force and resource hardening (#50).** Per-remote-IP AUTH-failure budget (10 failures/minute; further attempts get `421` and the connection closes; successful auths never consume budget). Global (`max_connections`, default 100) and per-IP (`max_connections_per_ip`, default 16) concurrent-connection caps; over-cap connections get a `421` before any protocol work.
+- **SMTP listener brute-force and resource hardening ([#50](https://github.com/craigmccaskill/posthorn/issues/50)).** Per-remote-IP AUTH-failure budget (10 failures/minute; further attempts get `421` and the connection closes; successful auths never consume budget). Global (`max_connections`, default 100) and per-IP (`max_connections_per_ip`, default 16) concurrent-connection caps; over-cap connections get a `421` before any protocol work.
+- CSRF rejections now increment `posthorn_spam_blocked_total{kind="csrf"}` — previously they were log-only and invisible on `/metrics`.
+- `spam_blocked` (honeypot and origin) and `csrf_rejected` log lines now carry `client_ip` for operator forensics, matching `rate_limited`; omitted when `strip_client_ip = true` (FR59).
 
 ### Fixed
 
 - An `[smtp_listener]`-only config (no `[[endpoints]]`) is now accepted — the config validator required at least one HTTP endpoint, breaking the documented Ghost and Gitea recipes and every SMTP-listener-only deployment. `posthorn validate` output now names the listener so a listener-only config doesn't report a bare "0 endpoint(s)". ([#37](https://github.com/craigmccaskill/posthorn/issues/37))
+- SMTP-listener sends now honor the FR19-22 retry policy — a transient provider error is retried once (as the HTTP ingress already did) instead of returning an immediate `451`. Previously a provider blip could drop a transactional email on the SMTP path that the HTTP path would have retried. The retry policy is now shared between both ingresses. ([#59](https://github.com/craigmccaskill/posthorn/issues/59))
 - The HTTP server now sets `ReadTimeout` (15s) and `WriteTimeout` (30s, chosen to exceed `ReadTimeout` + the handler's 10s request bound so a legitimate slow upload followed by a provider retry isn't truncated after the mail was sent) plus an explicit 64 KB `MaxHeaderBytes`, so slow-body senders and slow-reading clients can't hold connections indefinitely. ([#42](https://github.com/craigmccaskill/posthorn/issues/42))
 - Raw stdlib parse errors are no longer echoed to clients on malformed bodies; both parse paths return a generic 400 and log the detail server-side as `body_parse_failed`. Deliberate API-shape messages (e.g. "nested objects are not supported") remain client-visible. ([#42](https://github.com/craigmccaskill/posthorn/issues/42))
 
-### Added
+### Security & supply chain
 
-- CSRF rejections now increment `posthorn_spam_blocked_total{kind="csrf"}` — previously they were log-only and invisible on `/metrics`.
-- `spam_blocked` (honeypot and origin) and `csrf_rejected` log lines now carry `client_ip` for operator forensics, matching `rate_limited`; omitted when `strip_client_ip = true` (FR59).
+- CI now runs a `gofmt` gate, `govulncheck`, and `golangci-lint` on every push and pull request. ([#38](https://github.com/craigmccaskill/posthorn/issues/38))
+- Docker base images are pinned by digest, and Dependabot keeps the base images, Go modules, and GitHub Actions current. ([#39](https://github.com/craigmccaskill/posthorn/issues/39))
+- Release images now ship SLSA provenance and SBOM attestations, are signed with cosign (keyless via GitHub OIDC), and are gated on a Trivy vulnerability scan. ([#56](https://github.com/craigmccaskill/posthorn/issues/56))
+
+### Development
+
+- New hermetic provider-testing harness (`core/providertest`): ingress→egress end-to-end tests for all five transports and the SMTP listener, run on every PR with no credentials. A `make test-live` runner and a scheduled, protected workflow validate against real provider APIs (against non-delivering targets; SES via OIDC, no stored key). See [#76](https://github.com/craigmccaskill/posthorn/issues/76). Posthorn deliberately does not test deliverability/DKIM — the provider owns signing and reputation.
 
 ## [1.0.0] — 2026-05-26
 
