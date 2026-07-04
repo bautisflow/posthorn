@@ -19,6 +19,12 @@ import (
 	"github.com/craigmccaskill/posthorn/transport"
 )
 
+// sendTimeout is the hard upper bound on a single DATA submission's
+// outbound send, including any retries — the same FR22 bound the HTTP
+// gateway applies via its requestTimeout. Declared as a var so tests
+// can override; production never mutates it.
+var sendTimeout = 10 * time.Second
+
 // session is the per-connection SMTP state machine.
 //
 // State transitions (RFC 5321-shaped, simplified to what Posthorn needs):
@@ -364,11 +370,15 @@ func (s *session) handleDATA() {
 		return
 	}
 
-	// Hand off to the outbound transport.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Hand off to the outbound transport. SendWithRetry applies the
+	// FR19-22 retry policy (one retry on transient/429), shared with
+	// the HTTP ingress per ADR-12's ingress-agnostic egress (issue
+	// #59); previously the SMTP path called Send directly and returned
+	// an immediate 451 on errors the HTTP path would have retried.
+	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
 	submissionID := uuid.NewString()
-	result, sendErr := s.l.transport.Send(ctx, msg)
+	result, sendErr := transport.SendWithRetry(ctx, s.l.transport, msg, s.logger)
 	if sendErr != nil {
 		_ = s.writeReply(451, "4.0.0 Upstream transport failed")
 		s.logger.Error("smtp_submission_failed",

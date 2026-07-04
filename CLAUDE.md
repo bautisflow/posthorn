@@ -71,7 +71,7 @@ The "originally v1.x" labels are preserved as block A/B/C/D inside v1.0 for hist
 
 **Architecture deviations from original spec (cumulative):**
 - `core/http/` → `core/gateway/` to avoid shadowing stdlib `net/http`.
-- Retry timing constants declared as package vars (not consts) so tests can override via `gateway.SetRetryDelaysForTest`.
+- Retry timing constants declared as package vars (not consts) so tests can override via `gateway.SetRetryDelaysForTest`. **2026-07-03 (#59):** the FR19-22 policy itself moved to `transport.SendWithRetry`, shared by both ingresses — previously the SMTP session called `Send` directly and skipped retries. The gateway test hook keeps its API and now sets `transport.TransientRetryDelay`/`RateLimitedRetryDelay`.
 - [`site/`](./site/) Astro + Starlight directory; deploys via [`.github/workflows/site-deploy.yml`](./.github/workflows/site-deploy.yml). Build: `cd site && npm ci && npm run build`.
 - **2026-05-15:** Caddy v2 adapter module cut. FR27–FR30, NFR10 deleted; ADR-6, ADR-7 retired in-place.
 - **2026-05-15:** Honeypot 200 response shape parity (commit `0f27f4c`).

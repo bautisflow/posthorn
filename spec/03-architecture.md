@@ -74,6 +74,7 @@ posthorn/
     │   └── handler_test.go
     ├── transport/
     │   ├── transport.go          # Transport interface, Message, ErrorClass, TransportError
+    │   ├── retry.go              # SendWithRetry: FR19-22 policy, shared by both ingresses (#59)
     │   ├── postmark.go           # Postmark HTTP API implementation
     │   ├── resend.go             # v1.0 block C: Resend HTTP API (FR47)
     │   ├── mailgun.go            # v1.0 block C: Mailgun HTTP API (FR48)

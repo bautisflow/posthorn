@@ -31,12 +31,22 @@ type mockTransport struct {
 	sent   []transport.Message
 	result transport.SendResult
 	err    error
+
+	// errQueue, when non-empty, overrides err: each Send pops the head
+	// and returns it (nil = success). Lets retry tests script
+	// fail-then-succeed sequences.
+	errQueue []error
 }
 
 func (m *mockTransport) Send(_ context.Context, msg transport.Message) (transport.SendResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sent = append(m.sent, msg)
+	if len(m.errQueue) > 0 {
+		e := m.errQueue[0]
+		m.errQueue = m.errQueue[1:]
+		return m.result, e
+	}
 	return m.result, m.err
 }
 
@@ -734,6 +744,64 @@ func TestSMTP_AuthNone_HappyPath_DeliversMessage(t *testing.T) {
 // prevention layer survives even when auth is disabled. AllowedSenders
 // is the only thing standing between the listener and a true open relay
 // in this mode, so the test is load-bearing.
+// --- FR19-22 retry policy on the SMTP path (issue #59) ---
+
+// smtpDataFlow drives EHLO/AUTH/MAIL/RCPT/DATA against the fixture and
+// returns the response code to the end-of-DATA dot.
+func smtpDataFlow(t *testing.T, f *smtpFixture) int {
+	t.Helper()
+	tp := f.dial()
+	_ = tp.PrintfLine("EHLO client.test")
+	expectMultiline(t, tp, 250)
+	_ = tp.PrintfLine("AUTH PLAIN %s", authPlainCreds("user", "pass"))
+	expect(t, tp, 235)
+	_ = tp.PrintfLine("MAIL FROM:<noreply@example.com>")
+	expect(t, tp, 250)
+	_ = tp.PrintfLine("RCPT TO:<alice@somewhere.com>")
+	expect(t, tp, 250)
+	_ = tp.PrintfLine("DATA")
+	expect(t, tp, 354)
+	_ = tp.PrintfLine("Subject: Hello\r\n\r\nBody.\r\n.")
+	code, _ := expectCode(t, tp)
+	return code
+}
+
+func TestSMTP_TransientUpstream_RetriesOnce_Succeeds(t *testing.T) {
+	// One transient failure then success must yield 250 with two Send
+	// calls — the same FR19 retry the HTTP path applies. Before #59
+	// the SMTP path returned an immediate 451 here.
+	oldDelay := transport.TransientRetryDelay
+	transport.TransientRetryDelay = time.Millisecond
+	t.Cleanup(func() { transport.TransientRetryDelay = oldDelay })
+
+	f := startListener(t, baseTestConfig())
+	f.mt.errQueue = []error{
+		&transport.TransportError{Class: transport.ErrTransient, Status: 503, Message: "blip"},
+	}
+	if code := smtpDataFlow(t, f); code != 250 {
+		t.Fatalf("DATA response = %d, want 250 after transient retry", code)
+	}
+	waitForSend(t, f.mt, 2, 500*time.Millisecond)
+	if got := len(f.mt.Sent()); got != 2 {
+		t.Errorf("Send calls = %d, want 2 (original + one retry)", got)
+	}
+}
+
+func TestSMTP_TerminalUpstream_NoRetry_451(t *testing.T) {
+	// Terminal errors don't retry (FR21): one Send call, 451 to the
+	// client.
+	f := startListener(t, baseTestConfig())
+	f.mt.errQueue = []error{
+		&transport.TransportError{Class: transport.ErrTerminal, Status: 422, Message: "bad payload"},
+	}
+	if code := smtpDataFlow(t, f); code != 451 {
+		t.Fatalf("DATA response = %d, want 451 on terminal upstream error", code)
+	}
+	if got := len(f.mt.Sent()); got != 1 {
+		t.Errorf("Send calls = %d, want 1 (no retry on terminal)", got)
+	}
+}
+
 func TestSMTP_AuthNone_SenderAllowlist_StillEnforced(t *testing.T) {
 	cfg := baseTestConfig()
 	cfg.AuthRequired = AuthNone
