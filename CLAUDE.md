@@ -38,7 +38,7 @@ When a feature request or implementation proposal conflicts with one of these, t
 **Operator validation truth (was Story 12.3):** Postmark (2026-05-16) and Resend (2026-05-24, recorded in [docs/manual-test.md](docs/manual-test.md) with DKIM/SPF pass + NFR3 sentinel check) are validated against live accounts. **Mailgun, AWS SES, outbound-SMTP relay, and the SMTP listener shipped without recorded live validation.** Manual-test procedures exist for all of them; this is open operational debt, not closed.
 
 **Issue tracker (groomed):**
-- v1.1 spam minor (milestone 1): #31 honeypots, #32 CSRF min-age, #33 Turnstile, #34 content-shape, #44 StopForumSpam, #45 proof-of-browser (needs its own ADR: challenge delivery touches ADR-16), #60 pipeline pre-work, #61 on_spam/tag, #62 single-use tokens, #63 strict origin. Demoted: #35 domain blocklist, #36 per-day cap.
+- v1.1 spam minor (milestone 1): #31 honeypots, #32 CSRF min-age, #33 Turnstile, #34 content-shape, #44 StopForumSpam, #45 proof-of-browser (design settled: ADR-18 challenge endpoint), #60 pipeline pre-work, #61 on_spam/tag, #62 single-use tokens, #63 strict origin. Demoted: #35 domain blocklist, #36 per-day cap.
 - 2026-07-03 audit queue: #50 SMTP brute-force/conn limits (highest severity), #51 internal ops bind, #52 SMTP CRLF defense-in-depth, #53 skip-verify WARN, #54 allowlist case bug, #55 inflight bound, #56 release supply chain, #57 SMTP metrics dead code, #58 validate skips SMTP checks, #59 SMTP retry-policy divergence (spec decision)
 - QoL queue (v1.0.x or v1.1): #27 ephemeral self-signed TLS cert, #28 friendlier validation errors, #29 flatten Go module to repo root for `go install` (conflicts with ADR-2 — decide deliberately)
 - v2 platform: #4, #5, #8, #9, #21–25
@@ -95,7 +95,7 @@ The v1.0 specification is across three documents in [`spec/`](./spec/):
 
 1. **[`spec/01-project-brief.md`](./spec/01-project-brief.md)** — problem, users, scope, success metrics, threat model, risks, constraints. Status log captures the major scope decisions (2026-04-27 initial, 2026-04-27 SMTP-broader scope, 2026-05-15 Caddy cut, 2026-05-16 v1.1 amendment + batch drop + `to_override` add + v1.x-fold-into-v1.0).
 2. **[`spec/02-prd.md`](./spec/02-prd.md)** — FR1–FR68 and NFR1–NFR24 organized as four blocks (A: form ingress, B: API mode, C: multi-transport + ops, D: SMTP ingress). FR27–FR30 / NFR10 / NFR14 are deleted slots from the 2026-05-15 Caddy adapter cut. Epics 1–12. Traceability table maps every FR to a brief section.
-3. **[`spec/03-architecture.md`](./spec/03-architecture.md)** — file layout, lifecycle, request flow, component design, threat→defense mapping (now covers HTTP form + API mode + SMTP threats), dependencies, ADRs 1–17, forward-compatibility commitments for v2.
+3. **[`spec/03-architecture.md`](./spec/03-architecture.md)** — file layout, lifecycle, request flow, component design, threat→defense mapping (now covers HTTP form + API mode + SMTP threats), dependencies, ADRs 1–18, forward-compatibility commitments for v2.
 
 The PRD has the canonical FR/NFR list with "must"-level requirements; the architecture doc has the implementation blueprint, including the target file layout under §"File layout".
 
@@ -145,6 +145,7 @@ ADRs are recorded in [`spec/03-architecture.md`](./spec/03-architecture.md) §"A
 - **ADR-15 (2026-05-16):** Prometheus `/metrics` exposition is hand-rolled (~50 LOC). No `prometheus/client_golang` dep.
 - **ADR-16 (2026-05-16):** CSRF tokens are HMAC-signed timestamps, issued by operator at form-render time (`csrf_secret` never crosses to client). No cookies, no token-fetch round-trip.
 - **ADR-17 (2026-05-16):** Outbound-SMTP and inbound-SMTP both use stdlib `net/smtp` + `crypto/tls` directly. Stdlib-first when the surface is small.
+- **ADR-18 (2026-07-03):** Proof-of-browser (#45) tokens come from a Posthorn-served challenge GET endpoint — a scoped exception to ADR-16's no-round-trip stance (which is unchanged for CSRF). Composes with #62 single-use cache + min-age; CORS via `allowed_origins`; rate-limited. Deliberately recorded as defeating no-JS bots, not adapted bots — Turnstile (#33) stays the escalation tier.
 
 If you find yourself wanting to deviate from an active ADR, update the architecture doc with the new decision and rationale before changing code.
 
