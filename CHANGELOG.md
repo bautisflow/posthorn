@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - An `[smtp_listener]`-only config (no `[[endpoints]]`) is now accepted — the config validator required at least one HTTP endpoint, breaking the documented Ghost and Gitea recipes and every SMTP-listener-only deployment. `posthorn validate` output now names the listener so a listener-only config doesn't report a bare "0 endpoint(s)". ([#37](https://github.com/craigmccaskill/posthorn/issues/37))
-- The HTTP server now sets `ReadTimeout`/`WriteTimeout` (15s, above the handler's 10s request bound) and an explicit 64 KB `MaxHeaderBytes`, so slow-body senders and slow-reading clients can't hold connections past the handler's own limit. ([#42](https://github.com/craigmccaskill/posthorn/issues/42))
+- The HTTP server now sets `ReadTimeout` (15s) and `WriteTimeout` (30s, chosen to exceed `ReadTimeout` + the handler's 10s request bound so a legitimate slow upload followed by a provider retry isn't truncated after the mail was sent) plus an explicit 64 KB `MaxHeaderBytes`, so slow-body senders and slow-reading clients can't hold connections indefinitely. ([#42](https://github.com/craigmccaskill/posthorn/issues/42))
 - Raw stdlib parse errors are no longer echoed to clients on malformed bodies; both parse paths return a generic 400 and log the detail server-side as `body_parse_failed`. Deliberate API-shape messages (e.g. "nested objects are not supported") remain client-visible. ([#42](https://github.com/craigmccaskill/posthorn/issues/42))
 
 ### Added
