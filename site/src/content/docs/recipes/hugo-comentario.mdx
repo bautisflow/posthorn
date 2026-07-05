@@ -61,7 +61,7 @@ Comentario IS dynamic — it runs as a container on the same Docker host as Post
        image: ghcr.io/craigmccaskill/posthorn:latest
        restart: unless-stopped
        volumes:
-         - ./posthorn.toml:/etc/posthorn/config.toml:ro
+         - ./posthorn.toml:/etc/posthorn/config.toml:ro   # Podman/SELinux: append ,Z
        env_file: .env
        networks:
          - posthorn-internal

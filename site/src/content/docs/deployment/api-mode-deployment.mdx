@@ -31,7 +31,7 @@ services:
     ports:
       - "127.0.0.1:8080:8080"   # loopback only; not reachable from outside
     volumes:
-      - ./posthorn.toml:/etc/posthorn/config.toml:ro
+      - ./posthorn.toml:/etc/posthorn/config.toml:ro   # Podman/SELinux: append ,Z
     env_file: .env
 ```
 
@@ -45,7 +45,7 @@ services:
     networks:
       - internal
     volumes:
-      - ./posthorn.toml:/etc/posthorn/config.toml:ro
+      - ./posthorn.toml:/etc/posthorn/config.toml:ro   # Podman/SELinux: append ,Z
     env_file: .env
 
   my-worker:

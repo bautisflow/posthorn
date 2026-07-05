@@ -86,7 +86,7 @@ The canonical Posthorn use case. You have a static site (Astro, Jekyll, Hugo, El
        image: ghcr.io/craigmccaskill/posthorn:latest
        restart: unless-stopped
        volumes:
-         - ./posthorn.toml:/etc/posthorn/config.toml:ro
+         - ./posthorn.toml:/etc/posthorn/config.toml:ro   # Podman/SELinux: append ,Z
        env_file: .env
        ports:
          - "127.0.0.1:8080:8080"   # loopback only; reverse-proxy from your front door

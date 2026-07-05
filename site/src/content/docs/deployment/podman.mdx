@@ -1,0 +1,113 @@
+---
+title: Podman
+description: Run Posthorn under Podman — rootless containers, SELinux volume labels, Quadlet systemd units, and podman-compose. The image runs as-is; these are the runtime-specific details.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Posthorn's image is a standard OCI artifact with no Docker-specific dependencies, so Podman runs it as-is. It's built on distroless, runs as a non-root user (UID 65532), and binds only unprivileged ports (`:8080` for HTTP, `:2525` for the SMTP listener) — exactly what rootless Podman wants. This page covers the handful of runtime differences worth knowing.
+
+## Quick start
+
+```bash
+podman pull ghcr.io/craigmccaskill/posthorn:1.2.0
+
+podman run -d --name posthorn \
+  -v ./posthorn.toml:/etc/posthorn/config.toml:ro,Z \
+  -e POSTMARK_API_KEY \
+  -p 127.0.0.1:8080:8080 \
+  ghcr.io/craigmccaskill/posthorn:1.2.0
+```
+
+That runs rootless with no extra setup. The `,Z` on the volume is the one detail that bites people — see below.
+
+<Aside type="caution">
+Publish to `127.0.0.1` (or an internal network), never to a public interface. Posthorn doesn't terminate TLS; it expects a reverse proxy in front. Same rule as [Docker](/deployment/docker/).
+</Aside>
+
+## SELinux volume labels (the common gotcha)
+
+Podman's home turf is Fedora, RHEL, and their derivatives, which enforce SELinux. A bind-mounted config that works fine on Docker/Ubuntu fails on SELinux with a permission-denied the container can't explain (distroless has no shell to debug with). The fix is an SELinux relabel suffix on the mount:
+
+| Suffix | Meaning |
+|---|---|
+| `:Z` | Relabel the content **private** to this container — correct for a config only Posthorn reads |
+| `:z` | Relabel **shared** among containers — use only if another container also mounts the same path |
+
+Combine it with `ro`: `:ro,Z`. On a non-SELinux host the flag is a harmless no-op, so it's safe to keep in shared examples. This is why every recipe's config mount carries an inline `,Z` note.
+
+## Rootless networking and the client IP
+
+This one interacts with the spam checks. [Rate limiting](/features/rate-limiting/) and the reputation IP lookup both key on the client's source IP. Under rootless Podman with the older `slirp4netns` backend, the container sees every external connection as coming from the network gateway, not the real client — so per-IP rate limiting and IP reputation would collapse all traffic into a single address.
+
+In a normal deployment this is already handled two ways:
+
+- **Behind a reverse proxy (the recommended shape):** the real IP arrives in `X-Forwarded-For`, and Posthorn reads it once you set [`trusted_proxies`](/deployment/reverse-proxy/#forwarding-the-client-ip). The container's own source IP is irrelevant, so nothing to do.
+- **Directly exposed rootless:** use the newer `pasta` backend (the default on recent Podman), which preserves the source IP. `slirp4netns` does not.
+
+The degraded case is rootless *and* directly exposed *and* on `slirp4netns` at once. Put a reverse proxy in front, or move to `pasta`.
+
+## Quadlet (systemd-native)
+
+The idiomatic way to run Posthorn as a managed service under Podman is [Quadlet](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html): a `.container` file that systemd turns into a generated service. Drop this at `~/.config/containers/systemd/posthorn.container` (rootless) or `/etc/containers/systemd/posthorn.container` (system-wide):
+
+```ini
+[Unit]
+Description=Posthorn outbound mail gateway
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=ghcr.io/craigmccaskill/posthorn:1.2.0
+# Config, read-only, SELinux-relabeled private to this container
+Volume=%h/posthorn/posthorn.toml:/etc/posthorn/config.toml:ro,Z
+EnvironmentFile=%h/posthorn/posthorn.env
+# Loopback only — reverse-proxy from the host
+PublishPort=127.0.0.1:8080:8080
+# The process binds an unprivileged port and needs no capabilities
+DropCapability=ALL
+NoNewPrivileges=true
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+Then:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user start posthorn
+loginctl enable-linger "$USER"   # rootless: keep running after logout
+```
+
+A ready-to-edit copy lives in [`deploy/quadlet/`](https://github.com/craigmccaskill/posthorn/tree/main/deploy/quadlet) in the repo.
+
+<Aside type="tip" title="Auto-updates">
+Pin an exact version (`:1.2.0`) for production and update intentionally. If you'd rather `podman auto-update` track the minor line, use the floating `:1` tag and add `AutoUpdate=registry` under `[Container]`; then `podman auto-update` (or its systemd timer) pulls new digests and restarts the unit.
+</Aside>
+
+## podman-compose
+
+The [Docker Compose](/deployment/docker/) files and every [recipe](/recipes/contact-form/) work under `podman-compose` with two adjustments:
+
+```bash
+podman-compose -f docker-compose.yml up -d
+```
+
+- **Add `,Z` to the config mount:** `./posthorn.toml:/etc/posthorn/config.toml:ro,Z` (the recipes flag this inline).
+- **`internal: true` networks** behave the same, and container-to-container DNS (an app reaching `posthorn:2525`) resolves via `aardvark-dns`, so the [internal SMTP relay](/recipes/internal-smtp-relay/) recipe carries over unchanged.
+
+`podman compose` (the thin wrapper bundled with Podman) delegates to `podman-compose` or `docker-compose` when one is installed; either works.
+
+## Kubernetes YAML
+
+If you already describe workloads as Kubernetes manifests, `podman kube play posthorn.yaml` runs Posthorn from a `Pod` or `Deployment` spec without a cluster — useful if you later graduate the same YAML to real k8s. Mount the config via a `configMap`, and publish `8080` through a `Service` or host port behind your proxy.
+
+## What's the same as Docker
+
+- **Multi-arch:** the manifest list serves `amd64` and `arm64`; `podman pull` selects the right one with no flag.
+- **Health checks:** distroless has no shell, so an in-container `HealthCmd` can't `curl /healthz` — probe from the reverse proxy or a sidecar, exactly as on [Docker](/deployment/docker/#health-checks).
+- **Image conventions:** the config path, listen address, and `nonroot` UID 65532 are identical. See the [Docker page](/deployment/docker/#image-conventions).

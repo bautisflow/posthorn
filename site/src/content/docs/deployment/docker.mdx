@@ -15,6 +15,10 @@ docker pull ghcr.io/craigmccaskill/posthorn:latest
 
 Multi-arch tags are published for `linux/amd64` and `linux/arm64` from a single distroless base. The manifest list selects the right architecture automatically — `docker pull` on an ARM host fetches the arm64 image, on an x86 host the amd64 image, with no flag needed.
 
+<Aside type="tip" title="Running under Podman?">
+The image is a standard OCI artifact and runs rootless under Podman as-is. See [Podman](/deployment/podman/) for the runtime-specific details (SELinux volume labels, Quadlet units, rootless networking).
+</Aside>
+
 ## docker-compose.yml
 
 The canonical setup. Mount the config read-only, pass the Postmark token through the environment, expose port 8080 to the internal network only (reverse-proxy from your front door):
@@ -25,7 +29,7 @@ services:
     image: ghcr.io/craigmccaskill/posthorn:latest
     restart: unless-stopped
     volumes:
-      - ./posthorn.toml:/etc/posthorn/config.toml:ro
+      - ./posthorn.toml:/etc/posthorn/config.toml:ro   # Podman/SELinux: append ,Z
     environment:
       POSTMARK_API_KEY: ${POSTMARK_API_KEY}
     networks:

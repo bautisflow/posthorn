@@ -1,0 +1,38 @@
+# Posthorn — Quadlet unit for Podman (systemd-generated service).
+#
+# Rootless:    ~/.config/containers/systemd/posthorn.container
+# System-wide: /etc/containers/systemd/posthorn.container
+#
+# After placing this file:
+#   systemctl --user daemon-reload      # drop --user for a system-wide install
+#   systemctl --user start posthorn
+#   loginctl enable-linger "$USER"      # rootless: keep running after logout
+#
+# %h expands to the unit owner's home directory. For a system-wide install,
+# replace the %h paths with absolute ones.
+
+[Unit]
+Description=Posthorn outbound mail gateway
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=ghcr.io/craigmccaskill/posthorn:1.2.0
+# Config mounted read-only and SELinux-relabeled private to this container.
+# The ,Z is required on SELinux hosts (Fedora/RHEL); a no-op elsewhere.
+Volume=%h/posthorn/posthorn.toml:/etc/posthorn/config.toml:ro,Z
+# Provider credentials (e.g. POSTMARK_API_KEY=...). Keep this file mode 0600.
+EnvironmentFile=%h/posthorn/posthorn.env
+# Publish to loopback only — Posthorn does not terminate TLS, so reverse-proxy
+# from the host. Never publish to a public interface.
+PublishPort=127.0.0.1:8080:8080
+# Posthorn binds an unprivileged port and needs no Linux capabilities.
+DropCapability=ALL
+NoNewPrivileges=true
+
+[Service]
+Restart=always
+TimeoutStartSec=30
+
+[Install]
+WantedBy=default.target

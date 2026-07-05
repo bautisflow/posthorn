@@ -58,6 +58,10 @@ Yes — Caddy as a reverse proxy in front of the Posthorn container is the stand
 
 Earlier versions of Posthorn also shipped a Caddy v2 module (loaded via `xcaddy build`) for operators who wanted a single binary. That adapter was cut before v1.0 to keep the project to a single deployment shape — the sidecar-behind-Caddy path is one extra compose entry and works the same way Caddy users already integrate every other service.
 
+## Does Posthorn work with Podman?
+
+Yes, as-is. The image is a standard OCI artifact with no Docker-specific dependencies — it runs rootless, as a non-root user, on unprivileged ports. There are two runtime details worth knowing: config mounts need a `,Z` SELinux suffix on Fedora/RHEL, and rootless networking can hide the client IP from the rate limiter unless you're behind a reverse proxy. The [Podman](/deployment/podman/) page covers both, plus a Quadlet systemd unit.
+
 ## Does Posthorn handle file attachments?
 
 **Not currently.** File attachments land in v2 alongside SQLite persistent storage. If your form has file inputs, the file content is silently ignored — only text fields make it to the email.
