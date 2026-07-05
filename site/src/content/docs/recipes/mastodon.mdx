@@ -1,0 +1,81 @@
+---
+title: Self-hosted Mastodon via Posthorn
+description: Route a self-hosted Mastodon instance's transactional mail (confirmations, password resets, notifications) through Posthorn's SMTP listener, without giving Mastodon your provider credentials or needing outbound SMTP on the host.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+You're running a self-hosted [Mastodon](https://joinmastodon.org) instance. Mastodon sends email for account confirmation, password resets, and notification digests via SMTP. On a cloud host that blocks outbound SMTP — or when you'd rather keep your provider key in one place — Posthorn's SMTP listener accepts Mastodon's connection on a private network and forwards over HTTPS to your transactional provider.
+
+**At the end:** Mastodon's `sidekiq` (which sends the mail) talks to `posthorn:2525` over a private Docker network with no TLS and no AUTH, and Posthorn forwards via the configured HTTP transport.
+
+## The shape
+
+```d2
+direction: right
+host: Docker host {
+  mastodon: "Mastodon\nweb + sidekiq"
+  posthorn: "Posthorn\nSMTP listener (auth=none)"
+  mastodon -> posthorn: "SMTP on posthorn:2525\n(internal network)"
+}
+provider: "Postmark · Resend\nMailgun · SES"
+host.posthorn -> provider: HTTPS
+```
+
+## Walkthrough
+
+<Steps>
+
+1. **Same private Docker network, no host-port exposure for Posthorn** (see the [Authentik recipe](/recipes/authentik/) for the compose skeleton — it's identical).
+
+2. **Write `posthorn.toml`.**
+
+   ```toml
+   [smtp_listener]
+   listen          = ":2525"
+   auth_required   = "none"
+   require_tls     = false
+   trusted_network = true            # required for auth "none" on a container bind (#41)
+   allowed_senders = ["*@yourdomain.com"]
+
+   [smtp_listener.transport]
+   type = "resend"
+
+   [smtp_listener.transport.settings]
+   api_key = "${env.RESEND_API_KEY}"
+   ```
+
+3. **Point Mastodon at Posthorn** in its `.env.production` (read by both `web` and `sidekiq`):
+
+   ```bash
+   SMTP_SERVER=posthorn
+   SMTP_PORT=2525
+   SMTP_LOGIN=
+   SMTP_PASSWORD=
+   SMTP_AUTH_METHOD=none
+   SMTP_OPENSSL_VERIFY_MODE=none
+   SMTP_ENABLE_STARTTLS=never
+   SMTP_FROM_ADDRESS=Mastodon <notifications@yourdomain.com>
+   ```
+
+   `SMTP_ENABLE_STARTTLS=never` and the empty `SMTP_LOGIN`/`SMTP_PASSWORD` are the important ones — they keep Mastodon from trying to upgrade the connection or authenticate, which matches the plaintext-on-the-internal-network listener.
+
+4. **Test the delivery path** with Mastodon's built-in mailer task:
+
+   ```bash
+   docker compose run --rm web bin/tootctl email test you@example.com
+   ```
+
+   Posthorn logs `smtp_submission_sent` with the provider's `transport_message_id`.
+
+</Steps>
+
+## Common gotchas
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Sidekiq mailer job retries with a TLS error | `SMTP_ENABLE_STARTTLS` not `never` | Set `SMTP_ENABLE_STARTTLS=never` (older Mastodon: `SMTP_TLS=false`, `SMTP_ENABLE_STARTTLS_AUTO=false`) |
+| `530 5.7.0 Must issue STARTTLS first` from Posthorn | Listener has `require_tls = true` | Set `require_tls = false` for the internal-network deployment |
+| `550 5.7.1 Sender not authorized` | `SMTP_FROM_ADDRESS` domain not in `allowed_senders` | Add `*@yourdomain.com` |
+
+Mail sends from `sidekiq`, so check its logs (not `web`) when debugging delivery. See [Internal SMTP relay](/recipes/internal-smtp-relay/) for the trust model behind `auth_required = "none"`.

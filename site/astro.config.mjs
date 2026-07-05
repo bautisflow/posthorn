@@ -103,6 +103,8 @@ export default defineConfig({
             { label: 'Hugo blog + Comentario comments', slug: 'recipes/hugo-comentario' },
             { label: 'Self-hosted Gitea', slug: 'recipes/gitea' },
             { label: 'Self-hosted Ghost', slug: 'recipes/ghost' },
+            { label: 'Self-hosted Authentik', slug: 'recipes/authentik' },
+            { label: 'Self-hosted Mastodon', slug: 'recipes/mastodon' },
             { label: 'Weekly Umami digest (API mode)', slug: 'recipes/umami' },
           ],
         },

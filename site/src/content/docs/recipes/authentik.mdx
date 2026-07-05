@@ -1,0 +1,99 @@
+---
+title: Self-hosted Authentik via Posthorn
+description: Route Authentik's transactional mail (email verification, password recovery, MFA enrollment) through Posthorn's SMTP listener, so your identity provider reaches a transactional provider without the host needing outbound SMTP.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+You're running [Authentik](https://goauthentik.io) as your identity provider. Authentik sends email for account verification, password recovery, and MFA enrollment. On a cloud VPS that blocks outbound SMTP, or when you simply don't want to hand Authentik your provider credentials, Posthorn's SMTP listener accepts Authentik's connection on a private Docker network and forwards over HTTPS to whichever transactional provider you've chosen.
+
+**At the end:** Authentik points its email settings at `posthorn:2525` over a private Docker network — no TLS, no AUTH — and Posthorn forwards via the configured HTTP transport to Postmark, Resend, Mailgun, or SES.
+
+## The shape
+
+```d2
+direction: right
+host: Docker host {
+  authentik: Authentik\n(server + worker)
+  posthorn: "Posthorn\nSMTP listener (auth=none)"
+  authentik -> posthorn: "SMTP on posthorn:2525\n(internal network)"
+}
+provider: "Postmark · Resend\nMailgun · SES"
+host.posthorn -> provider: HTTPS
+```
+
+Only the Authentik **worker** sends mail, but pointing both server and worker at Posthorn is simplest and harmless.
+
+## Walkthrough
+
+<Steps>
+
+1. **Put Posthorn and Authentik on the same private Docker network** (no `ports:` exposure for Posthorn):
+
+   ```yaml
+   # docker-compose.yml (excerpt)
+   networks:
+     internal:
+       internal: true
+   services:
+     posthorn:
+       image: ghcr.io/craigmccaskill/posthorn:latest
+       restart: unless-stopped
+       volumes:
+         - ./posthorn.toml:/etc/posthorn/config.toml:ro
+       env_file: .env
+       networks: [internal]
+       # no ports: — reachable only from inside the network
+   ```
+
+2. **Write `posthorn.toml`.**
+
+   ```toml
+   [smtp_listener]
+   listen          = ":2525"
+   auth_required   = "none"
+   require_tls     = false
+   trusted_network = true            # asserts the Docker network is the trust boundary (#41)
+   allowed_senders = ["*@yourdomain.com"]
+
+   [smtp_listener.transport]
+   type = "postmark"
+
+   [smtp_listener.transport.settings]
+   api_key = "${env.POSTMARK_API_KEY}"
+   ```
+
+   <Aside type="caution" title="trusted_network is required">
+   Since v1.1, `auth_required = "none"` on a non-loopback bind (like `:2525` inside a container) refuses to start unless you set `trusted_network = true`. That flag is your explicit statement that the network is the trust boundary — which, with no `ports:` exposure, it is.
+   </Aside>
+
+3. **Point Authentik at Posthorn** via environment (applies to both `server` and `worker`):
+
+   ```yaml
+   environment:
+     AUTHENTIK_EMAIL__HOST: posthorn
+     AUTHENTIK_EMAIL__PORT: "2525"
+     AUTHENTIK_EMAIL__USE_TLS: "false"
+     AUTHENTIK_EMAIL__USE_SSL: "false"
+     AUTHENTIK_EMAIL__FROM: "authentik@yourdomain.com"
+     # AUTHENTIK_EMAIL__USERNAME / __PASSWORD intentionally unset
+   ```
+
+4. **Start the stack and test.** In the Authentik admin interface, use *System → Settings → Test email* (or trigger a password recovery). Posthorn logs the session:
+
+   ```json
+   {"msg":"smtp_session_open","ingress":"smtp"}
+   {"msg":"smtp_submission_sent","transport_message_id":"..."}
+   ```
+
+</Steps>
+
+## Common gotchas
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Authentik logs a TLS handshake error | `AUTHENTIK_EMAIL__USE_TLS` / `USE_SSL` still `true` | Set both to `false`; the listener runs plaintext on the internal network |
+| `550 5.7.1 Sender not authorized` | `AUTHENTIK_EMAIL__FROM` isn't on `allowed_senders` | Add the address (or a `*@domain` wildcard) |
+| Posthorn won't start: `auth_required = "none"` refused | Missing the trust ack | Add `trusted_network = true`, and keep the listener off any host port |
+
+See [Internal SMTP relay](/recipes/internal-smtp-relay/) for the full reasoning on the auth-none + private-network model.
