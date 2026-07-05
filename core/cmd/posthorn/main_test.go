@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/craigmccaskill/posthorn/config"
+	"github.com/craigmccaskill/posthorn/metrics"
 )
 
 // --- buildTransport ---
@@ -100,6 +101,32 @@ func TestRunValidate_Valid(t *testing.T) {
 	}
 }
 
+func TestRunValidate_SMTPListener_SemanticError(t *testing.T) {
+	// Structurally valid (config.Load passes) but the SMTP-level checks
+	// fail: require_tls defaults to true with no tls_cert. Before #58,
+	// runValidate skipped these and reported OK; now it must fail.
+	cfg := validTOML + `
+[smtp_listener]
+listen          = "127.0.0.1:2525"
+allowed_senders = ["*@example.com"]
+
+[[smtp_listener.smtp_users]]
+username = "u"
+password = "p"
+
+[smtp_listener.transport]
+type = "postmark"
+
+[smtp_listener.transport.settings]
+api_key = "k"
+`
+	path := writeConfig(t, cfg)
+	err := runValidate([]string{"--config", path})
+	if err == nil || !strings.Contains(err.Error(), "smtp_listener") {
+		t.Errorf("want an smtp_listener validation error, got %v", err)
+	}
+}
+
 func TestRunValidate_FileNotFound(t *testing.T) {
 	err := runValidate([]string{"--config", "/no/such/file.toml"})
 	if err == nil {
@@ -130,6 +157,16 @@ func TestRunValidate_TemplateParseError(t *testing.T) {
 
 // --- buildMux ---
 
+// muxRegRec builds the mux with a fresh shared registry + recorder, the
+// way runServe now wires them (#57). Tests scrape /metrics through the
+// mux, which uses this registry.
+func muxRegRec(cfg *config.Config) (*http.ServeMux, *metrics.Registry, *metrics.Recorder, error) {
+	reg := metrics.New()
+	rec := metrics.NewRecorder(reg)
+	mux, err := buildMux(cfg, buildLogger(config.LoggingConfig{}), reg, rec)
+	return mux, reg, rec, err
+}
+
 func TestBuildMux_RoutesEndpointsCorrectly(t *testing.T) {
 	cfg := &config.Config{
 		Endpoints: []config.EndpointConfig{
@@ -146,8 +183,7 @@ func TestBuildMux_RoutesEndpointsCorrectly(t *testing.T) {
 			},
 		},
 	}
-	logger := buildLogger(config.LoggingConfig{})
-	mux, err := buildMux(cfg, logger)
+	mux, _, _, err := muxRegRec(cfg)
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}
@@ -182,7 +218,7 @@ func TestBuildMux_UnconfiguredPath_404(t *testing.T) {
 			},
 		},
 	}
-	mux, err := buildMux(cfg, buildLogger(config.LoggingConfig{}))
+	mux, _, _, err := muxRegRec(cfg)
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}
@@ -210,7 +246,7 @@ func TestBuildMux_BadTransport_PropagatesError(t *testing.T) {
 			},
 		},
 	}
-	_, err := buildMux(cfg, buildLogger(config.LoggingConfig{}))
+	_, _, _, err := muxRegRec(cfg)
 	if err == nil {
 		t.Fatal("expected error for bad transport")
 	}
@@ -233,7 +269,7 @@ func TestBuildMux_HealthzRegistered(t *testing.T) {
 			},
 		},
 	}
-	mux, err := buildMux(cfg, buildLogger(config.LoggingConfig{}))
+	mux, _, _, err := muxRegRec(cfg)
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}
@@ -265,7 +301,7 @@ func TestBuildMux_MetricsRegistered(t *testing.T) {
 			},
 		},
 	}
-	mux, err := buildMux(cfg, buildLogger(config.LoggingConfig{}))
+	mux, _, _, err := muxRegRec(cfg)
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}
@@ -314,7 +350,7 @@ func TestBuildMux_MetricsObservedAfterRequest(t *testing.T) {
 			},
 		},
 	}
-	mux, err := buildMux(cfg, buildLogger(config.LoggingConfig{}))
+	mux, _, _, err := muxRegRec(cfg)
 	if err != nil {
 		t.Fatalf("buildMux: %v", err)
 	}

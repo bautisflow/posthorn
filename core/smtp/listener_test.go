@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/http/httptest"
 	"net/textproto"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/craigmccaskill/posthorn/config"
+	"github.com/craigmccaskill/posthorn/metrics"
 	"github.com/craigmccaskill/posthorn/transport"
 )
 
@@ -69,14 +71,18 @@ type smtpFixture struct {
 	cancel   context.CancelFunc
 }
 
-func startListener(t *testing.T, cfg ListenerConfig) *smtpFixture {
+func startListener(t *testing.T, cfg ListenerConfig, rec ...*metrics.Recorder) *smtpFixture {
 	t.Helper()
 	if cfg.MaxMessageSize == "" {
 		cfg.MaxMessageSize = "1MB"
 	}
 	mt := &mockTransport{}
 	maxBody := int64(1 << 20) // 1MB for tests
-	l, err := New(cfg, mt, maxBody, nil, nil)
+	var recorder *metrics.Recorder
+	if len(rec) > 0 {
+		recorder = rec[0]
+	}
+	l, err := New(cfg, mt, maxBody, nil, recorder)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -737,6 +743,34 @@ func TestSMTP_AuthNone_HappyPath_DeliversMessage(t *testing.T) {
 	waitForSend(t, f.mt, 1, 500*time.Millisecond)
 	if got := len(f.mt.Sent()); got != 1 {
 		t.Errorf("transport.Send calls = %d, want 1 (AuthNone happy path)", got)
+	}
+}
+
+// TestSMTP_RecorderWired asserts the SMTP ingress records metrics when a
+// recorder is provided (#57): before the fix, cmd/posthorn passed nil and
+// posthorn_submissions_sent_total{endpoint="smtp_listener"} never emitted.
+func TestSMTP_RecorderWired(t *testing.T) {
+	reg := metrics.New()
+	f := startListener(t, baseTestConfig(), metrics.NewRecorder(reg))
+	tp := f.dial()
+	_ = tp.PrintfLine("EHLO client.test")
+	expectMultiline(t, tp, 250)
+	_ = tp.PrintfLine("AUTH PLAIN %s", authPlainCreds("user", "pass"))
+	expect(t, tp, 235)
+	_ = tp.PrintfLine("MAIL FROM:<noreply@example.com>")
+	expect(t, tp, 250)
+	_ = tp.PrintfLine("RCPT TO:<alice@somewhere.com>")
+	expect(t, tp, 250)
+	_ = tp.PrintfLine("DATA")
+	expect(t, tp, 354)
+	_ = tp.PrintfLine("Subject: Hi\r\n\r\nBody.\r\n.")
+	expectCode(t, tp)
+	waitForSend(t, f.mt, 1, 2*time.Second)
+
+	scrape := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(scrape, httptest.NewRequest("GET", "/metrics", nil))
+	if want := `posthorn_submissions_sent_total{endpoint="smtp_listener",transport="postmark"} 1`; !strings.Contains(scrape.Body.String(), want) {
+		t.Errorf("missing %q in metrics:\n%s", want, scrape.Body.String())
 	}
 }
 

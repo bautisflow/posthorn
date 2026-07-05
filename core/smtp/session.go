@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -401,6 +402,7 @@ func (s *session) handleDATA() {
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
 	submissionID := uuid.NewString()
+	sendStart := time.Now()
 	result, sendErr := transport.SendWithRetry(ctx, s.l.transport, msg, s.logger)
 	if sendErr != nil {
 		_ = s.writeReply(451, "4.0.0 Upstream transport failed")
@@ -418,17 +420,17 @@ func (s *session) handleDATA() {
 		slog.String("transport_message_id", result.MessageID),
 		slog.Int64("size_bytes", n),
 	)
-	s.recordSendOk()
+	s.recordSendOk(time.Since(sendStart))
 	s.resetTransaction()
 }
 
-func (s *session) recordSendOk() {
+func (s *session) recordSendOk(latency time.Duration) {
 	if s.l.recorder == nil {
 		return
 	}
-	// Use a synthetic "smtp" ingress label so operators can split
+	// The "smtp_listener" endpoint label lets operators split
 	// inbound-via-HTTP from inbound-via-SMTP in metrics.
-	s.l.recorder.Sent("smtp_listener", s.l.cfg.Transport.Type, 0)
+	s.l.recorder.Sent("smtp_listener", s.l.cfg.Transport.Type, latency)
 }
 
 func (s *session) recordSendFailed(err error) {
@@ -437,29 +439,10 @@ func (s *session) recordSendFailed(err error) {
 	}
 	cls := "unknown"
 	var te *transport.TransportError
-	if asTransportError(err, &te) {
+	if errors.As(err, &te) {
 		cls = te.Class.String()
 	}
 	s.l.recorder.Failed("smtp_listener", s.l.cfg.Transport.Type, cls)
-}
-
-// asTransportError is a small wrapper around errors.As to avoid an
-// extra import line at the call site.
-func asTransportError(err error, out **transport.TransportError) bool {
-	for cur := err; cur != nil; cur = unwrap(cur) {
-		if te, ok := cur.(*transport.TransportError); ok {
-			*out = te
-			return true
-		}
-	}
-	return false
-}
-
-func unwrap(err error) error {
-	if u, ok := err.(interface{ Unwrap() error }); ok {
-		return u.Unwrap()
-	}
-	return nil
 }
 
 func (s *session) resetTransaction() {
