@@ -147,6 +147,32 @@ type EndpointConfig struct {
 	// (form-mode only). Content-agnostic — targets repeat form-spam
 	// identities. See ReputationConfig.
 	Reputation *ReputationConfig `toml:"reputation"`
+
+	// ProofOfBrowser: optional JS-gated submit token (form-mode only,
+	// #45/ADR-18). Blocks bots that POST directly without executing the
+	// page JavaScript that fetches the token. See ProofOfBrowserConfig.
+	ProofOfBrowser *ProofOfBrowserConfig `toml:"proof_of_browser"`
+}
+
+// ProofOfBrowserConfig configures the proof-of-browser check
+// (`[endpoints.proof_of_browser]`). Its presence enables the check.
+// Posthorn serves a challenge token from a GET on the endpoint; the
+// operator embeds a small script that fetches it and injects it as the
+// `_pob_token` field before submit. Form-mode only (ADR-18).
+type ProofOfBrowserConfig struct {
+	// Secret is the HMAC key for the challenge token. Optional: when
+	// empty, Posthorn generates a random one at startup (fine for a
+	// single replica). Set it explicitly for multi-replica deployments so
+	// every replica verifies the same tokens; ≥16 bytes when set.
+	Secret string `toml:"secret"`
+
+	// TTL is the token lifetime. Default 30m.
+	TTL Duration `toml:"ttl"`
+
+	// MinAge, when set, rejects a token submitted sooner than this after
+	// it was issued — a time-trap for bots that fetch-then-submit
+	// instantly. Must be less than the effective TTL.
+	MinAge Duration `toml:"min_age"`
 }
 
 // ReputationConfig configures the optional reputation check
@@ -206,6 +232,31 @@ func (r *ReputationConfig) validate() error {
 	}
 	if r.CacheTTL.Std() < 0 {
 		return fmt.Errorf("cache_ttl: must be non-negative, got %v", r.CacheTTL.Std())
+	}
+	return nil
+}
+
+// validate checks the proof_of_browser block. Called only for form-mode
+// endpoints (api-mode rejects the whole block above).
+func (p *ProofOfBrowserConfig) validate() error {
+	if p.Secret != "" {
+		if err := csrf.ValidateSecret([]byte(p.Secret)); err != nil {
+			return err
+		}
+	}
+	if p.TTL.Std() < 0 {
+		return fmt.Errorf("ttl: must be non-negative, got %v", p.TTL.Std())
+	}
+	if p.MinAge.Std() < 0 {
+		return fmt.Errorf("min_age: must be non-negative, got %v", p.MinAge.Std())
+	}
+	// Resolve the effective TTL for the min_age < ttl check (default 30m).
+	ttl := p.TTL.Std()
+	if ttl == 0 {
+		ttl = 30 * time.Minute
+	}
+	if p.MinAge.Std() >= ttl {
+		return fmt.Errorf("min_age (%v) must be less than ttl (%v)", p.MinAge.Std(), ttl)
 	}
 	return nil
 }
@@ -518,6 +569,9 @@ func (e *EndpointConfig) Validate() error {
 		if e.Reputation != nil {
 			return errors.New("reputation: not valid on auth=\"api-key\" endpoints (form-mode only in v1.1)")
 		}
+		if e.ProofOfBrowser != nil {
+			return errors.New("proof_of_browser: not valid on auth=\"api-key\" endpoints (server-to-server callers don't run a browser)")
+		}
 		// FR42: idempotency_cache_size must be positive when set; zero
 		// means "use the default" (handler-side resolution).
 		if e.IdempotencyCacheSize < 0 {
@@ -547,6 +601,11 @@ func (e *EndpointConfig) Validate() error {
 		if e.Reputation != nil {
 			if err := e.Reputation.validate(); err != nil {
 				return fmt.Errorf("reputation: %w", err)
+			}
+		}
+		if e.ProofOfBrowser != nil {
+			if err := e.ProofOfBrowser.validate(); err != nil {
+				return fmt.Errorf("proof_of_browser: %w", err)
 			}
 		}
 	}
