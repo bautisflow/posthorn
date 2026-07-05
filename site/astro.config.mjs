@@ -129,6 +129,7 @@ export default defineConfig({
         },
         { label: 'Design principles', slug: 'design-principles' },
         { label: 'Roadmap', slug: 'roadmap' },
+        { label: 'Changelog', slug: 'changelog' },
         { label: 'FAQ', slug: 'faq' },
       ],
     }),

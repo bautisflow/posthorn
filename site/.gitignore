@@ -7,6 +7,9 @@ public/d2/
 # generated types
 .astro/
 
+# generated content (built from repo-root CHANGELOG.md by scripts/gen-changelog.mjs)
+src/content/docs/changelog.md
+
 # dependencies
 node_modules/
 
