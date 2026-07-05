@@ -83,20 +83,37 @@ interval = "1m"
 
 A token-bucket limiter per client IP, per endpoint. 5 submissions per minute means a burst of 5 immediately, then refilling at 5 per minute thereafter. Exceeding triggers 429.
 
-## What ships beyond the basics
+## CSRF tokens
 
-Posthorn also ships Cross-Site Request Forgery (CSRF) tokens, signed with a Hash-based Message Authentication Code (HMAC) — `csrf_secret`, off by default; **form-mode only** — api-mode endpoints reject `csrf_secret` at parse time, since server-to-server callers are authenticated. Operators issue tokens server-side at form-render time using the same `csrf_secret`; Posthorn verifies the HMAC and Time-To-Live (TTL) on submit. The token field name is `_csrf_token`. See the `csrf_secret` and `csrf_token_ttl` rows in the [TOML reference](/configuration/reference/) for the config shape.
+Posthorn ships Cross-Site Request Forgery (CSRF) tokens, signed with a Hash-based Message Authentication Code (HMAC) — `csrf_secret`, off by default; **form-mode only** — api-mode endpoints reject `csrf_secret` at parse time, since server-to-server callers are authenticated. Operators issue tokens server-side at form-render time using the same `csrf_secret`; Posthorn verifies the HMAC and Time-To-Live (TTL) on submit. The token field name is `_csrf_token`. See the `csrf_secret` and `csrf_token_ttl` rows in the [TOML reference](/configuration/reference/) for the config shape.
+
+## The escalation ladder
+
+The defenses above stop naive and cross-site bots. The checks below target the harder case: automated form spam that fills valid-looking fields, varies its wording and language, and reuses throwaway sender addresses. They're **content-agnostic** — they key on identity and browser behavior, not the message text, because the message has no reliable signature. Turn them on in order, escalating only if spam persists.
+
+### Reputation (`[endpoints.reputation]`)
+
+An optional [StopForumSpam](https://www.stopforumspam.com/) lookup on the submitter's email and IP before send. It catches the sender rather than the message, so it works across every language and length the spam takes, and a repeat offender is caught on every attempt after the first. Fails open by default so a provider outage never blocks real mail. This is usually the highest-value first step against contact-form spam. It sends the submitter email and IP to a third party — opt-in, note it in your privacy policy.
+
+### Proof of browser (`[endpoints.proof_of_browser]`)
+
+A JavaScript-gated submit token: Posthorn serves a challenge token from a `GET` on the endpoint, a small inline script fetches it and injects it as a hidden `_pob_token` field, and the token is verified on submit. Bots that POST the form directly without running the page's JavaScript never get a token and are rejected. No third party involved. An optional `min_age` adds a time-trap that rejects submissions completing impossibly fast.
+
+### Captcha (`[endpoints.captcha]`)
+
+Cloudflare Turnstile verification — the backstop for bots that render a real browser and would pass proof-of-browser. It adds a third-party dependency and a visible widget, so it's the last rung, not the first. A failed token returns a byte-identical silent 200 so a bot can't tell it was caught; on a provider outage it fails closed by default.
+
+See the [TOML reference](/configuration/reference/) for every field, and [Reading logs](/deployment/reading-logs/) for the `spam_blocked` kinds these emit.
 
 ## What doesn't ship
 
 | Feature | Status | Notes |
 |---|---|---|
-| Time-based form tokens | future | Reject submissions that complete impossibly fast (< 3s) |
-| reCAPTCHA / hCaptcha | (not planned) | Forces a third-party dependency; conflicts with the self-hosted ethos |
 | Proof-of-work challenge | v3 | Computational cost imposed on submitter |
-| Bayesian content classification | (not planned) | Too easy to evade with modern LLMs |
+| Content-shape rules (`max_links`, `min_message_length`) | deprioritized | Real-world spam had no content signature; a length floor rejects legitimate short inquiries |
+| Bayesian content classification | (not planned) | Too easy to evade with modern LLMs; the reputation/browser checks are content-agnostic by design |
 
-For most operators, the v1.0 stack catches 95%+ of automated abuse with no operator friction. The cases it doesn't catch are mostly low-rate manual abuse — much rarer in practice than the drive-by bots that the honeypot handles.
+The honeypot, origin, and rate-limit basics catch drive-by bots with zero operator friction. The escalation ladder handles the automated form spam that gets past them — start with reputation, add proof-of-browser, and reach for Turnstile only if the first two aren't enough.
 
 ## Order of checks
 
@@ -112,8 +129,11 @@ For reference, the spam-protection layers run in this order in the request pipel
 8. (body is parsed here)
 9. **Honeypot** (form mode only) — after parse, since it needs the form values.
 10. **CSRF** (form mode only, when `csrf_secret` is set) — checks the `_csrf_token` form field.
-11. **Validation** (required fields, email format).
+11. **Proof of browser** (when configured) — checks the `_pob_token` field.
+12. **Captcha** (when configured) — verifies the Turnstile token (network call).
+13. **Reputation** (when configured) — StopForumSpam lookup on email/IP (network call).
+14. **Validation** (required fields, email format).
 
-The ordering matters: cheap header-only checks reject obvious junk before the server pays to parse the body. The honeypot check has to wait until after parse because it needs to look at the form value of the honeypot field.
+The ordering matters: cheap header-only checks reject obvious junk before the server pays to parse the body, and the local form checks (honeypot, CSRF, proof-of-browser) run before the network checks (captcha, reputation) so a cheap rejection short-circuits before any outbound call.
 
 See [Core concepts → Request pipeline](/getting-started/concepts/#the-request-pipeline) for the full ordered list.
