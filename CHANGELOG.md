@@ -24,6 +24,15 @@ Spam-protection minor. Adds three content-agnostic checks that target automated 
 
 - The three spam checks (origin, honeypot, CSRF) were refactored into a two-phase pipeline ([#60](https://github.com/craigmccaskill/posthorn/issues/60)): header checks pre-parse, form checks post-parse, each producing a `spam.Verdict` the handler renders through one mapping. No behavior change — the extraction is what let the three new checks land as small additions rather than more inline blocks.
 
+### Fixed
+
+- The SMTP ingress was constructed with a nil metrics recorder, so `posthorn_submissions_sent_total{endpoint="smtp_listener"}` and its failure counter never emitted. The registry and recorder are now shared with the HTTP mux, and the real send latency is recorded (was hardcoded 0). ([#57](https://github.com/craigmccaskill/posthorn/issues/57))
+- `posthorn validate` now builds the SMTP ingress, so a listener config with a semantic error (e.g. `require_tls` with no `tls_cert`) is caught at validate time instead of failing at boot. ([#58](https://github.com/craigmccaskill/posthorn/issues/58))
+
+### Recipes
+
+- Added Authentik and Mastodon SMTP-listener recipes to the docs site.
+
 ## [1.1.0] — 2026-07-04
 
 A security-hardening and operational-maturity release, from a full audit of the shipped v1.0. One breaking change (below) that closes an open-relay footgun; everything else is additive or a fix.
