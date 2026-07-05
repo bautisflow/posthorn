@@ -143,12 +143,20 @@ API-mode only. A request arrived with an `Idempotency-Key` that's still in fligh
 
 `kind` is one of:
 
-| `kind` | Trigger | Extra fields |
-|---|---|---|
-| `honeypot` | Honeypot field non-empty | `client_ip` |
-| `origin` | Origin/Referer failed the `allowed_origins` check | `reason` (specific check that fired), `client_ip` |
+| `kind` | Trigger | Response | Extra fields |
+|---|---|---|---|
+| `honeypot` | Honeypot field non-empty | silent 200 | `client_ip` |
+| `origin` | Origin/Referer failed the `allowed_origins` check | 403 | `reason`, `client_ip` |
+| `csrf` | CSRF token missing/invalid/expired (also logged as `csrf_rejected`) | 403 | `reason`, `client_ip` |
+| `reputation` | Submitter email/IP over the StopForumSpam confidence threshold | 403 | `reason`, `client_ip` |
+| `proof_of_browser` | Missing/invalid/expired/too-new challenge token (also logged as `pob_rejected`) | 403 | `reason`, `client_ip` |
+| `captcha` | Turnstile rejected the token, or a provider error under fail-closed | silent 200 | `client_ip` |
 
 The `body_too_large` case is its own event (below), not a `spam_blocked.kind`.
+
+### `pob_rejected` / `reputation_failed_open` / `captcha_failed_open`
+
+`pob_rejected` accompanies a proof-of-browser block (it also increments `posthorn_spam_blocked_total{kind="proof_of_browser"}`). `reputation_failed_open` and `captcha_failed_open` are logged when a reputation or captcha provider errors and the check is configured to fail open — the submission is *allowed*, and the event pairs with `posthorn_check_failed_open_total{check="reputation"|"captcha"}` so a sustained-outage bypass window is visible.
 
 ### `body_too_large`
 

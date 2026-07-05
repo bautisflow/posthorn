@@ -929,3 +929,77 @@ api_key = "k"
 		}
 	})
 }
+
+// --- v1.2 spam checks: mode-mutex + block validation ---
+
+func TestValidate_APIKeyMode_RejectsSpamChecks(t *testing.T) {
+	for _, tc := range []struct{ name, block, want string }{
+		{"reputation", "\n[endpoints.reputation]\nprovider = \"stopforumspam\"\ncheck = [\"email\"]\n", "reputation: not valid on auth=\"api-key\""},
+		{"proof_of_browser", "\n[endpoints.proof_of_browser]\nttl = \"30m\"\n", "proof_of_browser: not valid on auth=\"api-key\""},
+		{"captcha", "\n[endpoints.captcha]\nprovider = \"turnstile\"\nsecret_key = \"k\"\n", "captcha: not valid on auth=\"api-key\""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadString(t, minimalAPITOML+tc.block)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("want %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestValidate_Reputation_Block(t *testing.T) {
+	for _, tc := range []struct{ name, block, want string }{
+		{"bad provider", "\n[endpoints.reputation]\nprovider = \"akismet\"\ncheck = [\"email\"]\n", "only \"stopforumspam\""},
+		{"empty check", "\n[endpoints.reputation]\nprovider = \"stopforumspam\"\ncheck = []\n", "at least one of"},
+		{"unknown check", "\n[endpoints.reputation]\nprovider = \"stopforumspam\"\ncheck = [\"phone\"]\n", "unknown value"},
+		{"confidence range", "\n[endpoints.reputation]\nprovider = \"stopforumspam\"\ncheck = [\"ip\"]\nconfidence = 150\n", "0"},
+		{"ok", "\n[endpoints.reputation]\nprovider = \"stopforumspam\"\ncheck = [\"email\", \"ip\"]\nconfidence = 90\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadString(t, minimalTOML+tc.block)
+			if tc.want == "" {
+				if err != nil {
+					t.Errorf("want ok, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("want %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestValidate_ProofOfBrowser_Block(t *testing.T) {
+	// min_age must be less than ttl.
+	bad := minimalTOML + "\n[endpoints.proof_of_browser]\nttl = \"10s\"\nmin_age = \"20s\"\n"
+	if _, err := loadString(t, bad); err == nil || !strings.Contains(err.Error(), "min_age") {
+		t.Errorf("want min_age<ttl error, got %v", err)
+	}
+	ok := minimalTOML + "\n[endpoints.proof_of_browser]\nttl = \"30m\"\nmin_age = \"3s\"\n"
+	if _, err := loadString(t, ok); err != nil {
+		t.Errorf("valid proof_of_browser should load, got %v", err)
+	}
+}
+
+func TestValidate_Captcha_Block(t *testing.T) {
+	for _, tc := range []struct{ name, block, want string }{
+		{"bad provider", "\n[endpoints.captcha]\nprovider = \"recaptcha\"\nsecret_key = \"k\"\n", "only \"turnstile\""},
+		{"missing secret", "\n[endpoints.captcha]\nprovider = \"turnstile\"\n", "secret_key"},
+		{"bad on_provider_error", "\n[endpoints.captcha]\nprovider = \"turnstile\"\nsecret_key = \"k\"\non_provider_error = \"maybe\"\n", "on_provider_error"},
+		{"ok", "\n[endpoints.captcha]\nprovider = \"turnstile\"\nsecret_key = \"k\"\non_provider_error = \"open\"\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadString(t, minimalTOML+tc.block)
+			if tc.want == "" {
+				if err != nil {
+					t.Errorf("want ok, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("want %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
