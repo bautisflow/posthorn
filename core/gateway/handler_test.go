@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -2577,6 +2578,112 @@ func TestReputation_FailOpen_SendsAndMeters(t *testing.T) {
 	reg.Handler().ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if want := `posthorn_reputation_failed_open_total{endpoint="/contact"} 1`; !strings.Contains(scrape.Body.String(), want) {
 		t.Errorf("missing fail-open metric %q:\n%s", want, scrape.Body.String())
+	}
+}
+
+// --- Proof-of-browser (#45) ---
+
+func pobEndpoint(minAge time.Duration) config.EndpointConfig {
+	return config.EndpointConfig{
+		Path:     "/test",
+		To:       []string{"ops@example.com"},
+		From:     "noreply@example.com",
+		Subject:  "Contact",
+		Body:     "{{.message}}",
+		Required: []string{"message"},
+		ProofOfBrowser: &config.ProofOfBrowserConfig{
+			TTL:    config.Duration(time.Hour),
+			MinAge: config.Duration(minAge),
+		},
+	}
+}
+
+// fetchPOBToken performs the challenge GET and returns the issued token.
+func fetchPOBToken(t *testing.T, h *gateway.Handler) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/test", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("challenge status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("challenge body not JSON: %v", err)
+	}
+	if body.Token == "" {
+		t.Fatal("challenge returned an empty token")
+	}
+	return body.Token
+}
+
+func TestProofOfBrowser_ChallengeThenSubmit(t *testing.T) {
+	rt := &recordingTransport{}
+	h, err := gateway.New(pobEndpoint(0), rt)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	token := fetchPOBToken(t, h)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest(url.Values{"message": {"hello"}, "_pob_token": {token}}.Encode()))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 with a valid token; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(rt.sent) != 1 {
+		t.Errorf("valid submission sent %d messages, want 1", len(rt.sent))
+	}
+}
+
+func TestProofOfBrowser_MissingToken_Blocked(t *testing.T) {
+	rt := &recordingTransport{}
+	h, _ := gateway.New(pobEndpoint(0), rt)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest(url.Values{"message": {"hi"}}.Encode()))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("no token: status = %d, want 403", rec.Code)
+	}
+	if len(rt.sent) != 0 {
+		t.Errorf("blocked submission still sent %d messages", len(rt.sent))
+	}
+}
+
+func TestProofOfBrowser_ForgedToken_Blocked(t *testing.T) {
+	rt := &recordingTransport{}
+	h, _ := gateway.New(pobEndpoint(0), rt)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest(url.Values{"message": {"hi"}, "_pob_token": {"1700000000.deadbeef"}}.Encode()))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("forged token: status = %d, want 403", rec.Code)
+	}
+}
+
+func TestProofOfBrowser_MinAge_TooSoon_Blocked(t *testing.T) {
+	// A 1h min-age with a token fetched and submitted immediately is the
+	// time-trap: age ~ 0 < min_age, so the instant POST is rejected.
+	rt := &recordingTransport{}
+	h, _ := gateway.New(pobEndpoint(time.Hour), rt)
+	token := fetchPOBToken(t, h)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest(url.Values{"message": {"hi"}, "_pob_token": {token}}.Encode()))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("instant submit under min_age: status = %d, want 403", rec.Code)
+	}
+	if len(rt.sent) != 0 {
+		t.Errorf("time-trapped submission sent %d messages", len(rt.sent))
+	}
+}
+
+func TestProofOfBrowser_Challenge_EnforcesAllowedOrigins(t *testing.T) {
+	cfg := pobEndpoint(0)
+	cfg.AllowedOrigins = []string{"https://example.com"}
+	h, _ := gateway.New(cfg, &recordingTransport{})
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("challenge from disallowed origin: status = %d, want 403", rec.Code)
 	}
 }
 

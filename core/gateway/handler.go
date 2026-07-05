@@ -10,6 +10,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -82,6 +83,11 @@ type Handler struct {
 	// check is a new builder entry, not another inline block in ServeHTTP.
 	headerChecks []headerCheck
 	formChecks   []formCheck
+
+	// pob serves the proof-of-browser challenge (a GET on the endpoint);
+	// nil unless [endpoints.proof_of_browser] is configured. The matching
+	// verify check lives in formChecks.
+	pob *pobGate
 }
 
 // headerCheck inspects the request before the body is parsed (headers, IP).
@@ -105,6 +111,68 @@ const (
 // defaultCSRFTokenTTL is the resolved value when cfg.CSRFTokenTTL is
 // zero (operator didn't set it). One hour matches FR57's stated default.
 const defaultCSRFTokenTTL = time.Hour
+
+// Proof-of-browser (#45, ADR-18): a JS-gated submit token. pobTokenField
+// is the hidden form field the operator's inline script populates from
+// the challenge endpoint. defaultPOBTokenTTL matches the issue's default.
+const (
+	pobTokenField      = "_pob_token"
+	defaultPOBTokenTTL = 30 * time.Minute
+)
+
+// errPOBTooNew is the min-age (time-trap) rejection.
+var errPOBTooNew = errors.New("proof-of-browser token submitted too soon after issuance")
+
+// pobGate issues and verifies proof-of-browser tokens. It reuses the
+// CSRF HMAC-timestamp machinery (ADR-18: same token format, different
+// issuer — Posthorn issues via the challenge endpoint rather than the
+// operator at render time) and adds an optional minimum-age floor.
+type pobGate struct {
+	secret []byte
+	ttl    time.Duration
+	minAge time.Duration
+}
+
+func (p *pobGate) issue(now time.Time) string { return csrf.Issue(p.secret, now) }
+
+func (p *pobGate) verify(token string, now time.Time) error {
+	if err := csrf.Verify(token, p.secret, p.ttl, now); err != nil {
+		return err
+	}
+	if p.minAge > 0 {
+		// Verify passed, so the token is "<unix>.<hmac>" with a valid
+		// timestamp; re-parse it for the age check.
+		tsStr := token[:strings.IndexByte(token, '.')]
+		unix, err := strconv.ParseInt(tsStr, 10, 64)
+		if err != nil {
+			return err
+		}
+		if now.Sub(time.Unix(unix, 0)) < p.minAge {
+			return errPOBTooNew
+		}
+	}
+	return nil
+}
+
+// buildPOBGate constructs the proof-of-browser gate, generating a random
+// secret when the operator didn't set one (single-replica zero-config).
+func buildPOBGate(cfg *config.ProofOfBrowserConfig) (*pobGate, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	secret := []byte(cfg.Secret)
+	if len(secret) == 0 {
+		secret = make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			return nil, fmt.Errorf("generate secret: %w", err)
+		}
+	}
+	ttl := cfg.TTL.Std()
+	if ttl == 0 {
+		ttl = defaultPOBTokenTTL
+	}
+	return &pobGate{secret: secret, ttl: ttl, minAge: cfg.MinAge.Std()}, nil
+}
 
 // Option configures a Handler at construction time.
 type Option func(*Handler)
@@ -161,6 +229,10 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 	if cfg.CSRFSecret != "" {
 		// FR57: the CSRF token field is structural, not template content.
 		reserved = append(reserved, csrf.TokenField)
+	}
+	if cfg.ProofOfBrowser != nil {
+		// The proof-of-browser token field is structural (#45).
+		reserved = append(reserved, pobTokenField)
 	}
 
 	renderer, err := template.NewRenderer(cfg.Subject, cfg.Body, reserved)
@@ -235,6 +307,11 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 		return nil, fmt.Errorf("gateway: reputation: %w", err)
 	}
 
+	pob, err := buildPOBGate(cfg.ProofOfBrowser)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: proof_of_browser: %w", err)
+	}
+
 	h := &Handler{
 		cfg:                  cfg,
 		transport:            t,
@@ -249,7 +326,8 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 		csrfTokenTTL:         csrfTTL,
 		logger:               log.Discard(), // overridable via WithLogger
 		headerChecks:         buildHeaderChecks(cfg),
-		formChecks:           buildFormChecks(cfg, csrfTTL, emailField, repChecker),
+		pob:                  pob,
+		formChecks:           buildFormChecks(cfg, csrfTTL, emailField, repChecker, pob),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -305,7 +383,7 @@ func buildReputationChecker(cfg *config.ReputationConfig) (*reputation.Checker, 
 }
 
 // buildFormChecks assembles the post-parse spam checks from config.
-func buildFormChecks(cfg config.EndpointConfig, csrfTTL time.Duration, emailField string, rep *reputation.Checker) []formCheck {
+func buildFormChecks(cfg config.EndpointConfig, csrfTTL time.Duration, emailField string, rep *reputation.Checker, pob *pobGate) []formCheck {
 	var checks []formCheck
 	if cfg.Honeypot != "" {
 		field := cfg.Honeypot
@@ -323,6 +401,17 @@ func buildFormChecks(cfg config.EndpointConfig, csrfTTL time.Duration, emailFiel
 			token := form.Get(csrf.TokenField)
 			if err := csrf.Verify(token, secret, csrfTTL, time.Now()); err != nil {
 				return spam.Verdict{Blocked: true, Kind: "csrf", Event: "csrf_rejected", Reason: err.Error()}
+			}
+			return spam.Verdict{}
+		})
+	}
+	if pob != nil {
+		// Proof-of-browser (#45): the submission must carry a valid
+		// challenge token, which only the page JavaScript can fetch.
+		// Cheap local HMAC check — runs before the network reputation call.
+		checks = append(checks, func(_ context.Context, form url.Values, _ string) spam.Verdict {
+			if err := pob.verify(form.Get(pobTokenField), time.Now()); err != nil {
+				return spam.Verdict{Blocked: true, Kind: "proof_of_browser", Event: "pob_rejected", Reason: err.Error()}
 			}
 			return spam.Verdict{}
 		})
@@ -345,6 +434,28 @@ func buildFormChecks(cfg config.EndpointConfig, csrfTTL time.Duration, emailFiel
 		})
 	}
 	return checks
+}
+
+// serveChallenge answers a GET on a proof-of-browser endpoint with a
+// fresh token as JSON. When allowed_origins is configured, it enforces
+// the same origin allow-list so tokens can't be farmed from other sites;
+// it echoes an allowed Origin for CORS so a cross-origin form fetch can
+// read the token.
+func (h *Handler) serveChallenge(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin != "" && len(h.cfg.AllowedOrigins) > 0 {
+		if res, _ := spam.CheckOrigin(origin, "", h.cfg.AllowedOrigins); res == spam.HardReject {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
+	if origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]string{"token": h.pob.issue(time.Now())})
 }
 
 // applySpamVerdict renders a blocking Verdict as the log line, metric, and
@@ -426,6 +537,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, h.maxBodySize)
 	}
 
+	// Proof-of-browser challenge: a GET on a PoB-enabled endpoint issues a
+	// fresh token for the page JavaScript to fetch and inject (#45,
+	// ADR-18). Every other non-POST method is still 405.
+	if r.Method == http.MethodGet && h.pob != nil {
+		h.serveChallenge(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

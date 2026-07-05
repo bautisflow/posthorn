@@ -165,6 +165,38 @@ fail_open  = true
 
 **Privacy:** enabling this sends the submitter's email and IP to StopForumSpam. It's off by default and opt-in. Note it in your privacy policy if your jurisdiction requires it.
 
+### Proof of browser (form-mode only)
+
+An optional `[endpoints.proof_of_browser]` block requires a token that only JavaScript can obtain, which blocks bots that POST the form directly without executing the page's script. It's content-agnostic and needs no third party. API-mode endpoints reject the block at parse time.
+
+```toml
+[endpoints.proof_of_browser]
+ttl     = "30m"
+min_age = "3s"   # optional time-trap: reject submissions faster than a human
+```
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `secret` | string | no | random per start | HMAC key for the token. Leave unset for a single instance (a fresh random key is generated at startup). Set it (≥16 bytes) for multi-replica deployments so every replica verifies the same tokens. |
+| `ttl` | duration | no | `"30m"` | Token lifetime. |
+| `min_age` | duration | no | unset | When set, a token submitted sooner than this after issuance is rejected — a time-trap for bots that fetch-then-submit instantly. Must be less than `ttl`. |
+
+**How it works.** When enabled, a `GET` to the endpoint returns `{"token": "..."}`. Your form page fetches it and puts it in a hidden `_pob_token` field; Posthorn verifies it on submit. A missing, forged, expired, or too-new token is rejected with **403**. Add this to the page with your form (fetch on load so the token ages while the visitor types, which pairs with `min_age`):
+
+```html
+<form id="contact" action="https://posthorn.example.com/contact" method="POST">
+  <!-- your fields -->
+  <input type="hidden" name="_pob_token" value="">
+</form>
+<script>
+  fetch("https://posthorn.example.com/contact")
+    .then(r => r.json())
+    .then(d => { document.querySelector("#contact [name=_pob_token]").value = d.token; });
+</script>
+```
+
+If Posthorn is on a different host than the page, the challenge honors the endpoint's `allowed_origins` and sends the CORS header so the cross-origin `fetch` can read the token. Visitors with JavaScript disabled can't submit a proof-of-browser form, so keep it for public forms that get real bot traffic.
+
 ### Dry run
 
 | Field | Type | Required | Default | Description |
