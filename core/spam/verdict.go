@@ -33,6 +33,12 @@ type Verdict struct {
 
 	// Reason is optional log detail (the specific check that fired).
 	Reason string
+
+	// FailedOpen marks a non-blocking verdict from a check whose provider
+	// errored and was configured to fail open (reputation). The submission
+	// continues, but the handler logs and meters it so a sustained-outage
+	// bypass window is visible. Ignored when Blocked is true.
+	FailedOpen bool
 }
 
 // Blocks constructs a hard-reject Verdict (403 unless Status is set later).

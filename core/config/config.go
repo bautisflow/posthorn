@@ -142,6 +142,72 @@ type EndpointConfig struct {
 	// csrf_secret at parse time.
 	CSRFSecret   string   `toml:"csrf_secret"`
 	CSRFTokenTTL Duration `toml:"csrf_token_ttl"`
+
+	// Reputation: optional StopForumSpam lookup on the submitter email/IP
+	// (form-mode only). Content-agnostic — targets repeat form-spam
+	// identities. See ReputationConfig.
+	Reputation *ReputationConfig `toml:"reputation"`
+}
+
+// ReputationConfig configures the optional reputation check
+// (`[endpoints.reputation]`). Form-mode only.
+type ReputationConfig struct {
+	// Provider is the reputation source. Only "stopforumspam" in v1.
+	Provider string `toml:"provider"`
+
+	// BaseURL overrides the provider endpoint. Empty uses StopForumSpam's
+	// public API; set it to a compatible mirror or a privacy proxy.
+	BaseURL string `toml:"base_url"`
+
+	// Check lists which fields to look up: "email", "ip", or both.
+	// Non-empty; unknown entries are a parse error.
+	Check []string `toml:"check"`
+
+	// Confidence is the block threshold (0–100). A looked-up field that
+	// appears in the database with confidence ≥ this blocks the
+	// submission. Default 90.
+	Confidence float64 `toml:"confidence"`
+
+	// FailOpen: on provider error/timeout, allow (true, default) or block
+	// (false). Fail-open keeps a provider outage from blocking real mail.
+	FailOpen *bool `toml:"fail_open"`
+
+	// Timeout per lookup. Default 2s.
+	Timeout Duration `toml:"timeout"`
+
+	// CacheSize / CacheTTL bound the in-memory result cache. Defaults
+	// 10000 / 1h.
+	CacheSize int      `toml:"cache_size"`
+	CacheTTL  Duration `toml:"cache_ttl"`
+}
+
+// validate checks the reputation block. Called only for form-mode
+// endpoints (api-mode rejects the whole block above).
+func (r *ReputationConfig) validate() error {
+	if r.Provider != "stopforumspam" {
+		return fmt.Errorf("provider: only \"stopforumspam\" is supported, got %q", r.Provider)
+	}
+	if len(r.Check) == 0 {
+		return errors.New("check: list at least one of \"email\", \"ip\"")
+	}
+	for _, c := range r.Check {
+		if c != "email" && c != "ip" {
+			return fmt.Errorf("check: unknown value %q (want \"email\" or \"ip\")", c)
+		}
+	}
+	if r.Confidence < 0 || r.Confidence > 100 {
+		return fmt.Errorf("confidence: must be 0–100, got %v", r.Confidence)
+	}
+	if r.Timeout.Std() < 0 {
+		return fmt.Errorf("timeout: must be non-negative, got %v", r.Timeout.Std())
+	}
+	if r.CacheSize < 0 {
+		return fmt.Errorf("cache_size: must be non-negative, got %d", r.CacheSize)
+	}
+	if r.CacheTTL.Std() < 0 {
+		return fmt.Errorf("cache_ttl: must be non-negative, got %v", r.CacheTTL.Std())
+	}
+	return nil
 }
 
 // TransportConfig is the polymorphic transport block. Type names a concrete
@@ -449,6 +515,9 @@ func (e *EndpointConfig) Validate() error {
 		if e.CSRFSecret != "" {
 			return errors.New("csrf_secret: not valid on auth=\"api-key\" endpoints (api-mode callers are server-to-server; CSRF defense is form-mode only)")
 		}
+		if e.Reputation != nil {
+			return errors.New("reputation: not valid on auth=\"api-key\" endpoints (form-mode only in v1.1)")
+		}
 		// FR42: idempotency_cache_size must be positive when set; zero
 		// means "use the default" (handler-side resolution).
 		if e.IdempotencyCacheSize < 0 {
@@ -474,6 +543,11 @@ func (e *EndpointConfig) Validate() error {
 		}
 		if e.CSRFTokenTTL.Std() < 0 {
 			return fmt.Errorf("csrf_token_ttl: must be non-negative, got %v", e.CSRFTokenTTL.Std())
+		}
+		if e.Reputation != nil {
+			if err := e.Reputation.validate(); err != nil {
+				return fmt.Errorf("reputation: %w", err)
+			}
 		}
 	}
 

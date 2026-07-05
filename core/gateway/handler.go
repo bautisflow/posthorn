@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/craigmccaskill/posthorn/log"
 	"github.com/craigmccaskill/posthorn/metrics"
 	"github.com/craigmccaskill/posthorn/ratelimit"
+	"github.com/craigmccaskill/posthorn/reputation"
 	"github.com/craigmccaskill/posthorn/response"
 	"github.com/craigmccaskill/posthorn/spam"
 	"github.com/craigmccaskill/posthorn/template"
@@ -85,8 +87,10 @@ type Handler struct {
 // headerCheck inspects the request before the body is parsed (headers, IP).
 type headerCheck func(*http.Request) spam.Verdict
 
-// formCheck inspects the parsed form after the body is read.
-type formCheck func(url.Values) spam.Verdict
+// formCheck inspects the parsed form after the body is read. It receives
+// the client IP and a context so checks that make a network call
+// (reputation, captcha) can look up the submitter and honor cancellation.
+type formCheck func(ctx context.Context, form url.Values, clientIP string) spam.Verdict
 
 // defaultAuthFailureBudget caps brute-force attempts against api-mode
 // endpoints. Token bucket per client IP: defaultAuthFailureBudget tokens
@@ -226,6 +230,11 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 		csrfTTL = defaultCSRFTokenTTL
 	}
 
+	repChecker, err := buildReputationChecker(cfg.Reputation)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: reputation: %w", err)
+	}
+
 	h := &Handler{
 		cfg:                  cfg,
 		transport:            t,
@@ -240,7 +249,7 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 		csrfTokenTTL:         csrfTTL,
 		logger:               log.Discard(), // overridable via WithLogger
 		headerChecks:         buildHeaderChecks(cfg),
-		formChecks:           buildFormChecks(cfg, csrfTTL),
+		formChecks:           buildFormChecks(cfg, csrfTTL, emailField, repChecker),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -269,12 +278,38 @@ func buildHeaderChecks(cfg config.EndpointConfig) []headerCheck {
 	return checks
 }
 
+// buildReputationChecker constructs the StopForumSpam checker from the
+// endpoint's reputation config, or returns nil when unconfigured.
+func buildReputationChecker(cfg *config.ReputationConfig) (*reputation.Checker, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	failOpen := true // default; keeps a provider outage from blocking real mail
+	if cfg.FailOpen != nil {
+		failOpen = *cfg.FailOpen
+	}
+	confidence := cfg.Confidence
+	if confidence == 0 {
+		confidence = 90
+	}
+	return reputation.New(reputation.Config{
+		BaseURL:    cfg.BaseURL,
+		CheckEmail: slices.Contains(cfg.Check, "email"),
+		CheckIP:    slices.Contains(cfg.Check, "ip"),
+		Threshold:  confidence,
+		FailOpen:   failOpen,
+		Timeout:    cfg.Timeout.Std(),
+		CacheSize:  cfg.CacheSize,
+		CacheTTL:   cfg.CacheTTL.Std(),
+	})
+}
+
 // buildFormChecks assembles the post-parse spam checks from config.
-func buildFormChecks(cfg config.EndpointConfig, csrfTTL time.Duration) []formCheck {
+func buildFormChecks(cfg config.EndpointConfig, csrfTTL time.Duration, emailField string, rep *reputation.Checker) []formCheck {
 	var checks []formCheck
 	if cfg.Honeypot != "" {
 		field := cfg.Honeypot
-		checks = append(checks, func(form url.Values) spam.Verdict {
+		checks = append(checks, func(_ context.Context, form url.Values, _ string) spam.Verdict {
 			if spam.CheckHoneypot(form, field) == spam.SilentReject {
 				// Silent 200 so a bot can't tell rejection from success.
 				return spam.Verdict{Blocked: true, Silent: true, Kind: "honeypot"}
@@ -284,10 +319,27 @@ func buildFormChecks(cfg config.EndpointConfig, csrfTTL time.Duration) []formChe
 	}
 	if cfg.CSRFSecret != "" {
 		secret := []byte(cfg.CSRFSecret)
-		checks = append(checks, func(form url.Values) spam.Verdict {
+		checks = append(checks, func(_ context.Context, form url.Values, _ string) spam.Verdict {
 			token := form.Get(csrf.TokenField)
 			if err := csrf.Verify(token, secret, csrfTTL, time.Now()); err != nil {
 				return spam.Verdict{Blocked: true, Kind: "csrf", Event: "csrf_rejected", Reason: err.Error()}
+			}
+			return spam.Verdict{}
+		})
+	}
+	if rep != nil {
+		// Reputation lookup on the submitter email + client IP (#44).
+		// Content-agnostic — targets repeat form-spam identities. Runs
+		// last among form checks: it's the only one that makes a network
+		// call, so the free local checks short-circuit before it.
+		checks = append(checks, func(ctx context.Context, form url.Values, clientIP string) spam.Verdict {
+			res := rep.Check(ctx, form.Get(emailField), clientIP)
+			if res.Blocked {
+				return spam.Verdict{Blocked: true, Kind: "reputation", Reason: res.Reason}
+			}
+			if res.FailedOpen {
+				// Not blocked, but record the outage bypass.
+				return spam.Verdict{Kind: "reputation", Reason: res.Reason, FailedOpen: true}
 			}
 			return spam.Verdict{}
 		})
@@ -301,6 +353,15 @@ func buildFormChecks(cfg config.EndpointConfig, csrfTTL time.Duration) []formChe
 // every spam check flows through.
 func (h *Handler) applySpamVerdict(w http.ResponseWriter, r *http.Request, logger *slog.Logger, v spam.Verdict, clientIP, submissionID string, start time.Time) bool {
 	if !v.Blocked {
+		if v.FailedOpen {
+			// A reputation lookup errored and we fail-open. Not blocked,
+			// but meter the bypass so a sustained outage is visible.
+			logger.Info("reputation_failed_open",
+				slog.String("kind", v.Kind),
+				slog.String("reason", v.Reason),
+			)
+			h.recorder.ReputationFailedOpen(h.cfg.Path)
+		}
 		return false
 	}
 	event := v.Event
@@ -561,7 +622,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// same verdict mapping.
 	if !apiMode {
 		for _, check := range h.formChecks {
-			if h.applySpamVerdict(w, r, logger, check(r.Form), rateLimitKey, submissionID, start) {
+			if h.applySpamVerdict(w, r, logger, check(r.Context(), r.Form, rateLimitKey), rateLimitKey, submissionID, start) {
 				return
 			}
 		}

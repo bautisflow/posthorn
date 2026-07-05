@@ -140,6 +140,31 @@ Configuring `honeypot`, `allowed_origins`, `redirect_success`, `redirect_error`,
 
 See [Spam protection → CSRF tokens](/features/spam-protection/#what-ships-beyond-the-basics) for the issuance flow.
 
+### Reputation (form-mode only)
+
+An optional `[endpoints.reputation]` block checks the submitter's email and/or IP against a reputation database (StopForumSpam) before sending. It's content-agnostic — it targets repeat form-spam identities, not the message — so it catches the reply-bait spam that varies its wording and language while reusing burner addresses. API-mode endpoints reject this block at parse time.
+
+```toml
+[endpoints.reputation]
+provider   = "stopforumspam"
+check      = ["email", "ip"]
+confidence = 90
+fail_open  = true
+```
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `provider` | string | yes | — | Reputation source. Only `"stopforumspam"` in this release. |
+| `check` | `[]string` | yes | — | Which fields to look up: `"email"`, `"ip"`, or both. |
+| `confidence` | float | no | `90` | Block threshold (0–100). A looked-up field that *appears* in the database with confidence ≥ this rejects the submission with **403**. |
+| `fail_open` | bool | no | `true` | On a provider error or timeout, allow the submission (`true`) or block it (`false`). Fail-open keeps a StopForumSpam outage from blocking real mail; fail-open events increment `posthorn_reputation_failed_open_total`. |
+| `timeout` | duration | no | `"2s"` | Per-lookup HTTP timeout. |
+| `cache_size` | int | no | `10000` | Bounded LRU of lookup results. |
+| `cache_ttl` | duration | no | `"1h"` | How long a lookup result is reused. |
+| `base_url` | string | no | StopForumSpam public API | Override the endpoint to point at a compatible mirror or a privacy proxy. |
+
+**Privacy:** enabling this sends the submitter's email and IP to StopForumSpam. It's off by default and opt-in. Note it in your privacy policy if your jurisdiction requires it.
+
 ### Dry run
 
 | Field | Type | Required | Default | Description |
