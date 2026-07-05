@@ -108,7 +108,13 @@ func runServe(args []string) error {
 		slog.Int("endpoints", len(cfg.Endpoints)),
 	)
 
-	mux, err := buildMux(cfg, logger)
+	// One metrics registry + recorder for the whole process, shared by the
+	// HTTP mux (which also exposes /metrics) and the SMTP ingress (#57) so
+	// SMTP submissions land in the same scrape as HTTP ones.
+	metricsReg := metrics.New()
+	recorder := metrics.NewRecorder(metricsReg)
+
+	mux, err := buildMux(cfg, logger, metricsReg, recorder)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -143,7 +149,7 @@ func runServe(args []string) error {
 	// v1.0 block D: optional SMTP listener (FR62). Built only when the
 	// operator's TOML includes [smtp_listener].
 	if cfg.SMTPListener != nil {
-		smtpIng, err := buildSMTPIngress(cfg.SMTPListener, logger)
+		smtpIng, err := buildSMTPIngress(cfg.SMTPListener, logger, recorder)
 		if err != nil {
 			return fmt.Errorf("build smtp_listener: %w", err)
 		}
@@ -162,7 +168,7 @@ func runServe(args []string) error {
 // the smtp-package ListenerConfig, constructs the outbound transport
 // via the same registry the HTTP endpoints use, and returns the
 // resulting smtp.Listener (which satisfies ingress.Ingress).
-func buildSMTPIngress(c *config.SMTPListenerConfig, logger *slog.Logger) (ingress.Ingress, error) {
+func buildSMTPIngress(c *config.SMTPListenerConfig, logger *slog.Logger, recorder *metrics.Recorder) (ingress.Ingress, error) {
 	tp, err := buildTransport(c.Transport)
 	if err != nil {
 		return nil, fmt.Errorf("transport: %w", err)
@@ -199,7 +205,7 @@ func buildSMTPIngress(c *config.SMTPListenerConfig, logger *slog.Logger) (ingres
 	if err := listenerCfg.Validate(); err != nil {
 		return nil, err
 	}
-	return smtp.New(listenerCfg, tp, maxBody, logger, nil /* recorder wired by buildMux for HTTP only in v1.0 */)
+	return smtp.New(listenerCfg, tp, maxBody, logger, recorder)
 }
 
 // runIngressesUntilSignal starts each ingress in its own goroutine,
@@ -284,6 +290,16 @@ func runValidate(args []string) error {
 		}
 	}
 
+	// Build the SMTP ingress too (#58): its semantic checks (smtp_users
+	// required, TLS cert/key readable, client-cert CA parseable) live in
+	// buildSMTPIngress, not config.Load — so without this a listener-only
+	// config that passes `validate` could still fail at `serve`.
+	if cfg.SMTPListener != nil {
+		if _, err := buildSMTPIngress(cfg.SMTPListener, buildLogger(cfg.Logging), nil); err != nil {
+			return fmt.Errorf("smtp_listener: %w", err)
+		}
+	}
+
 	summary := fmt.Sprintf("%d endpoint(s)", len(cfg.Endpoints))
 	if cfg.SMTPListener != nil {
 		summary += " + smtp_listener"
@@ -302,11 +318,8 @@ func runValidate(args []string) error {
 // The mux additionally registers `/healthz` (FR54) and `/metrics`
 // (FR55) at fixed paths. Operators can firewall those paths at the
 // reverse proxy if internal-only access is desired.
-func buildMux(cfg *config.Config, logger *slog.Logger) (*http.ServeMux, error) {
+func buildMux(cfg *config.Config, logger *slog.Logger, metricsReg *metrics.Registry, recorder *metrics.Recorder) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
-
-	metricsReg := metrics.New()
-	recorder := metrics.NewRecorder(metricsReg)
 
 	for i, ep := range cfg.Endpoints {
 		t, err := buildTransport(ep.Transport)
