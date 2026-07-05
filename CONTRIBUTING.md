@@ -44,6 +44,12 @@ make site        # build the docs site
 
 `make test` needs **no third-party credentials** and is the everyday gate. It includes the `core/providertest/` harness — ingress→egress end-to-end tests that drive a real form (or a real `net/smtp` client) through the real gateway/listener and the real transport into a fake provider, asserting the wire shape and header-injection safety. CI runs exactly this on every push and PR (`go test -race ./...`); see [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
+### The docs site
+
+The [`site/`](./site/) Astro + Starlight source builds with `make site` (or `npm run build` inside `site/`) and **deploys automatically to GitHub Pages** via [`.github/workflows/site-deploy.yml`](./.github/workflows/site-deploy.yml) on every push to `main` that touches `site/**`. There's no manual publish step.
+
+The `/changelog` page is generated from the repo-root [`CHANGELOG.md`](./CHANGELOG.md) by `site/scripts/gen-changelog.mjs` as part of the build, so edit `CHANGELOG.md`, not the generated page (which is gitignored).
+
 ### Live-provider validation
 
 ```bash
