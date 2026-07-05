@@ -152,6 +152,34 @@ type EndpointConfig struct {
 	// #45/ADR-18). Blocks bots that POST directly without executing the
 	// page JavaScript that fetches the token. See ProofOfBrowserConfig.
 	ProofOfBrowser *ProofOfBrowserConfig `toml:"proof_of_browser"`
+
+	// Captcha: optional Cloudflare Turnstile verification (form-mode only,
+	// #33). The escalation tier — stops bots that render JS. See
+	// CaptchaConfig.
+	Captcha *CaptchaConfig `toml:"captcha"`
+}
+
+// CaptchaConfig configures the optional captcha check
+// (`[endpoints.captcha]`). Form-mode only.
+type CaptchaConfig struct {
+	// Provider is the captcha service. Only "turnstile" in this release.
+	Provider string `toml:"provider"`
+
+	// SecretKey is the provider secret used for server-side verification.
+	// Never sent to the client.
+	SecretKey string `toml:"secret_key"`
+
+	// OnProviderError selects behavior when the provider can't be reached:
+	// "closed" (default) rejects the submission; "open" allows it. A
+	// captcha that fails open is weak, so closed is the default; fail-open
+	// events increment posthorn_check_failed_open_total{check="captcha"}.
+	OnProviderError string `toml:"on_provider_error"`
+
+	// Timeout per verification. Default 3s.
+	Timeout Duration `toml:"timeout"`
+
+	// BaseURL overrides the siteverify endpoint (testing / self-hosted).
+	BaseURL string `toml:"base_url"`
 }
 
 // ProofOfBrowserConfig configures the proof-of-browser check
@@ -257,6 +285,26 @@ func (p *ProofOfBrowserConfig) validate() error {
 	}
 	if p.MinAge.Std() >= ttl {
 		return fmt.Errorf("min_age (%v) must be less than ttl (%v)", p.MinAge.Std(), ttl)
+	}
+	return nil
+}
+
+// validate checks the captcha block. Called only for form-mode endpoints.
+func (c *CaptchaConfig) validate() error {
+	if c.Provider != "turnstile" {
+		return fmt.Errorf("provider: only \"turnstile\" is supported, got %q", c.Provider)
+	}
+	if c.SecretKey == "" {
+		return errors.New("secret_key: required")
+	}
+	switch c.OnProviderError {
+	case "", "closed", "open":
+		// ok; empty means closed
+	default:
+		return fmt.Errorf("on_provider_error: must be \"closed\" or \"open\", got %q", c.OnProviderError)
+	}
+	if c.Timeout.Std() < 0 {
+		return fmt.Errorf("timeout: must be non-negative, got %v", c.Timeout.Std())
 	}
 	return nil
 }
@@ -572,6 +620,9 @@ func (e *EndpointConfig) Validate() error {
 		if e.ProofOfBrowser != nil {
 			return errors.New("proof_of_browser: not valid on auth=\"api-key\" endpoints (server-to-server callers don't run a browser)")
 		}
+		if e.Captcha != nil {
+			return errors.New("captcha: not valid on auth=\"api-key\" endpoints (server-to-server callers don't solve captchas)")
+		}
 		// FR42: idempotency_cache_size must be positive when set; zero
 		// means "use the default" (handler-side resolution).
 		if e.IdempotencyCacheSize < 0 {
@@ -606,6 +657,11 @@ func (e *EndpointConfig) Validate() error {
 		if e.ProofOfBrowser != nil {
 			if err := e.ProofOfBrowser.validate(); err != nil {
 				return fmt.Errorf("proof_of_browser: %w", err)
+			}
+		}
+		if e.Captcha != nil {
+			if err := e.Captcha.validate(); err != nil {
+				return fmt.Errorf("captcha: %w", err)
 			}
 		}
 	}

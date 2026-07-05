@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/craigmccaskill/posthorn/captcha"
 	"github.com/craigmccaskill/posthorn/config"
 	"github.com/craigmccaskill/posthorn/csrf"
 	"github.com/craigmccaskill/posthorn/idempotency"
@@ -154,6 +155,43 @@ func (p *pobGate) verify(token string, now time.Time) error {
 	return nil
 }
 
+// turnstileField is the form field Cloudflare Turnstile's widget writes
+// its response token into (#33).
+const turnstileField = "cf-turnstile-response"
+
+// buildCaptchaCheck builds the Turnstile form check, or returns nil when
+// unconfigured. On a provider/transport error it fails closed by default
+// (silent reject) or open (allow, metered) per on_provider_error.
+func buildCaptchaCheck(cfg *config.CaptchaConfig) (formCheck, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	v, err := captcha.New(captcha.Config{
+		BaseURL: cfg.BaseURL,
+		Secret:  cfg.SecretKey,
+		Timeout: cfg.Timeout.Std(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	failClosed := cfg.OnProviderError != "open" // default closed
+	return func(ctx context.Context, form url.Values, clientIP string) spam.Verdict {
+		err := v.Verify(ctx, form.Get(turnstileField), clientIP)
+		switch {
+		case err == nil:
+			return spam.Verdict{}
+		case errors.Is(err, captcha.ErrFailed):
+			// Silent 200 (NFR5 parity) so a bot can't tell it was caught.
+			return spam.Verdict{Blocked: true, Silent: true, Kind: "captcha"}
+		case failClosed:
+			return spam.Verdict{Blocked: true, Silent: true, Kind: "captcha", Reason: "provider error (fail-closed)"}
+		default:
+			// Fail open: allow, but meter the bypass.
+			return spam.Verdict{Kind: "captcha", Reason: err.Error(), FailedOpen: true}
+		}
+	}, nil
+}
+
 // buildPOBGate constructs the proof-of-browser gate, generating a random
 // secret when the operator didn't set one (single-replica zero-config).
 func buildPOBGate(cfg *config.ProofOfBrowserConfig) (*pobGate, error) {
@@ -234,6 +272,10 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 		// The proof-of-browser token field is structural (#45).
 		reserved = append(reserved, pobTokenField)
 	}
+	if cfg.Captcha != nil {
+		// The Turnstile response field is structural (#33).
+		reserved = append(reserved, turnstileField)
+	}
 
 	renderer, err := template.NewRenderer(cfg.Subject, cfg.Body, reserved)
 	if err != nil {
@@ -312,6 +354,11 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 		return nil, fmt.Errorf("gateway: proof_of_browser: %w", err)
 	}
 
+	captchaCheck, err := buildCaptchaCheck(cfg.Captcha)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: captcha: %w", err)
+	}
+
 	h := &Handler{
 		cfg:                  cfg,
 		transport:            t,
@@ -327,7 +374,7 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 		logger:               log.Discard(), // overridable via WithLogger
 		headerChecks:         buildHeaderChecks(cfg),
 		pob:                  pob,
-		formChecks:           buildFormChecks(cfg, csrfTTL, emailField, repChecker, pob),
+		formChecks:           buildFormChecks(cfg, csrfTTL, emailField, repChecker, pob, captchaCheck),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -383,7 +430,7 @@ func buildReputationChecker(cfg *config.ReputationConfig) (*reputation.Checker, 
 }
 
 // buildFormChecks assembles the post-parse spam checks from config.
-func buildFormChecks(cfg config.EndpointConfig, csrfTTL time.Duration, emailField string, rep *reputation.Checker, pob *pobGate) []formCheck {
+func buildFormChecks(cfg config.EndpointConfig, csrfTTL time.Duration, emailField string, rep *reputation.Checker, pob *pobGate, captchaCheck formCheck) []formCheck {
 	var checks []formCheck
 	if cfg.Honeypot != "" {
 		field := cfg.Honeypot
@@ -415,6 +462,11 @@ func buildFormChecks(cfg config.EndpointConfig, csrfTTL time.Duration, emailFiel
 			}
 			return spam.Verdict{}
 		})
+	}
+	if captchaCheck != nil {
+		// Turnstile verification (#33): the escalation tier for JS-capable
+		// bots. Network call; runs after the cheap local checks.
+		checks = append(checks, captchaCheck)
 	}
 	if rep != nil {
 		// Reputation lookup on the submitter email + client IP (#44).
@@ -467,11 +519,11 @@ func (h *Handler) applySpamVerdict(w http.ResponseWriter, r *http.Request, logge
 		if v.FailedOpen {
 			// A reputation lookup errored and we fail-open. Not blocked,
 			// but meter the bypass so a sustained outage is visible.
-			logger.Info("reputation_failed_open",
+			logger.Info(v.Kind+"_failed_open",
 				slog.String("kind", v.Kind),
 				slog.String("reason", v.Reason),
 			)
-			h.recorder.ReputationFailedOpen(h.cfg.Path)
+			h.recorder.CheckFailedOpen(h.cfg.Path, v.Kind)
 		}
 		return false
 	}

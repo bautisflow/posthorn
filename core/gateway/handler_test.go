@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -2576,8 +2577,107 @@ func TestReputation_FailOpen_SendsAndMeters(t *testing.T) {
 	}
 	scrape := httptest.NewRecorder()
 	reg.Handler().ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if want := `posthorn_reputation_failed_open_total{endpoint="/contact"} 1`; !strings.Contains(scrape.Body.String(), want) {
+	if want := `posthorn_check_failed_open_total{endpoint="/contact",check="reputation"} 1`; !strings.Contains(scrape.Body.String(), want) {
 		t.Errorf("missing fail-open metric %q:\n%s", want, scrape.Body.String())
+	}
+}
+
+// --- Captcha / Turnstile (#33) ---
+
+func captchaEndpoint(baseURL, onError string) config.EndpointConfig {
+	return config.EndpointConfig{
+		Path:     "/test",
+		To:       []string{"ops@example.com"},
+		From:     "noreply@example.com",
+		Subject:  "Contact",
+		Body:     "{{.message}}",
+		Required: []string{"message"},
+		Captcha: &config.CaptchaConfig{
+			Provider:        "turnstile",
+			SecretKey:       "secret",
+			BaseURL:         baseURL,
+			OnProviderError: onError,
+		},
+	}
+}
+
+func fakeSiteverify(t *testing.T, success bool) string {
+	t.Helper()
+	body := `{"success":false}`
+	if success {
+		body = `{"success":true}`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestCaptcha_ValidToken_Sends(t *testing.T) {
+	rt := &recordingTransport{}
+	h, _ := gateway.New(captchaEndpoint(fakeSiteverify(t, true), ""), rt)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest(url.Values{"message": {"hi"}, "cf-turnstile-response": {"tok"}}.Encode()))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(rt.sent) != 1 {
+		t.Errorf("valid captcha sent %d messages, want 1", len(rt.sent))
+	}
+}
+
+func TestCaptcha_Rejected_SilentAndNoSend(t *testing.T) {
+	rt := &recordingTransport{}
+	h, _ := gateway.New(captchaEndpoint(fakeSiteverify(t, false), ""), rt)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest(url.Values{"message": {"hi"}, "cf-turnstile-response": {"bad"}}.Encode()))
+	// NFR5 parity: rejection looks like success (silent 200) so a bot
+	// can't tell it was caught.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want silent 200 on rejection", rec.Code)
+	}
+	if len(rt.sent) != 0 {
+		t.Errorf("rejected captcha still sent %d messages", len(rt.sent))
+	}
+}
+
+func TestCaptcha_ProviderError_FailClosed_NoSend(t *testing.T) {
+	rt := &recordingTransport{}
+	cfg := captchaEndpoint("http://127.0.0.1:1", "closed") // dead provider
+	cfg.Captcha.Timeout = config.Duration(200 * time.Millisecond)
+	h, _ := gateway.New(cfg, rt)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest(url.Values{"message": {"hi"}, "cf-turnstile-response": {"tok"}}.Encode()))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fail-closed status = %d, want silent 200", rec.Code)
+	}
+	if len(rt.sent) != 0 {
+		t.Errorf("fail-closed on provider error still sent %d messages", len(rt.sent))
+	}
+}
+
+func TestCaptcha_ProviderError_FailOpen_SendsAndMeters(t *testing.T) {
+	rt := &recordingTransport{}
+	cfg := captchaEndpoint("http://127.0.0.1:1", "open") // dead provider
+	cfg.Captcha.Timeout = config.Duration(200 * time.Millisecond)
+	reg := metrics.New()
+	h, err := gateway.New(cfg, rt, gateway.WithRecorder(metrics.NewRecorder(reg)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, urlencodedRequest(url.Values{"message": {"hi"}, "cf-turnstile-response": {"tok"}}.Encode()))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fail-open status = %d, want 200", rec.Code)
+	}
+	if len(rt.sent) != 1 {
+		t.Errorf("fail-open sent %d messages, want 1", len(rt.sent))
+	}
+	scrape := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if want := `posthorn_check_failed_open_total{endpoint="/test",check="captcha"} 1`; !strings.Contains(scrape.Body.String(), want) {
+		t.Errorf("missing captcha fail-open metric %q:\n%s", want, scrape.Body.String())
 	}
 }
 

@@ -197,6 +197,37 @@ min_age = "3s"   # optional time-trap: reject submissions faster than a human
 
 If Posthorn is on a different host than the page, the challenge honors the endpoint's `allowed_origins` and sends the CORS header so the cross-origin `fetch` can read the token. Visitors with JavaScript disabled can't submit a proof-of-browser form, so keep it for public forms that get real bot traffic.
 
+### Captcha (form-mode only)
+
+An optional `[endpoints.captcha]` block verifies a Cloudflare Turnstile token on submit — the escalation tier for high-spam targets, stopping bots that render JavaScript and would pass proof-of-browser. It adds a third-party dependency and a visible widget, so reach for it only when reputation and proof-of-browser aren't enough. API-mode endpoints reject the block at parse time.
+
+```toml
+[endpoints.captcha]
+provider          = "turnstile"
+secret_key        = "${env.TURNSTILE_SECRET_KEY}"
+on_provider_error = "closed"
+```
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `provider` | string | yes | — | Only `"turnstile"` in this release. |
+| `secret_key` | string | yes | — | Turnstile secret key (server-side; never sent to the client). |
+| `on_provider_error` | string | no | `"closed"` | Behavior when Cloudflare can't be reached: `"closed"` rejects the submission (a captcha that fails open is weak), `"open"` allows it. Fail-open events increment `posthorn_check_failed_open_total{check="captcha"}`. |
+| `timeout` | duration | no | `"3s"` | Per-verification timeout. |
+| `base_url` | string | no | Cloudflare siteverify | Override the endpoint (testing). |
+
+A failed or missing token returns a byte-identical **200** (like the honeypot) so a bot can't tell it was caught. Add the Turnstile widget to your form; it writes the token into a `cf-turnstile-response` field that Posthorn verifies:
+
+```html
+<form action="https://posthorn.example.com/contact" method="POST">
+  <!-- your fields -->
+  <div class="cf-turnstile" data-sitekey="YOUR_TURNSTILE_SITE_KEY"></div>
+</form>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+```
+
+The `secret_key` here is the Turnstile **secret** key; the `data-sitekey` in the widget is the **site** key. Get both from the Cloudflare Turnstile dashboard.
+
 ### Dry run
 
 | Field | Type | Required | Default | Description |

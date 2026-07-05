@@ -18,16 +18,16 @@ var LatencyBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10}
 // without an enabling-condition check; tests that don't care about
 // metrics pass nil.
 type Recorder struct {
-	submitted            *Counter
-	sent                 *Counter
-	failed               *Counter
-	rateLimited          *Counter
-	authFailed           *Counter
-	spamBlocked          *Counter
-	reputationFailedOpen *Counter
-	validationFailed     *Counter
-	idempotentReplay     *Counter
-	sendLatency          *Histogram
+	submitted        *Counter
+	sent             *Counter
+	failed           *Counter
+	rateLimited      *Counter
+	authFailed       *Counter
+	spamBlocked      *Counter
+	checkFailedOpen  *Counter
+	validationFailed *Counter
+	idempotentReplay *Counter
+	sendLatency      *Histogram
 }
 
 // NewRecorder constructs a Recorder backed by counters and histograms
@@ -64,10 +64,10 @@ func NewRecorder(reg *Registry) *Recorder {
 			"Form-mode submissions rejected by spam defenses (honeypot/origin silent-200; csrf/reputation 403).",
 			[]string{"endpoint", "kind"},
 		),
-		reputationFailedOpen: NewCounter(
-			"posthorn_reputation_failed_open_total",
-			"Reputation lookups that errored and were allowed through (fail-open). A rising rate is a silent-bypass window.",
-			[]string{"endpoint"},
+		checkFailedOpen: NewCounter(
+			"posthorn_check_failed_open_total",
+			"Spam checks whose provider errored and were allowed through (fail-open). A rising rate is a silent-bypass window. check is \"reputation\" or \"captcha\".",
+			[]string{"endpoint", "check"},
 		),
 		validationFailed: NewCounter(
 			"posthorn_validation_failed_total",
@@ -92,7 +92,7 @@ func NewRecorder(reg *Registry) *Recorder {
 	reg.Register(r.rateLimited)
 	reg.Register(r.authFailed)
 	reg.Register(r.spamBlocked)
-	reg.Register(r.reputationFailedOpen)
+	reg.Register(r.checkFailedOpen)
 	reg.Register(r.validationFailed)
 	reg.Register(r.idempotentReplay)
 	reg.Register(r.sendLatency)
@@ -154,13 +154,15 @@ func (r *Recorder) SpamBlocked(endpoint, kind string) {
 	r.spamBlocked.Inc(endpoint, kind)
 }
 
-// ReputationFailedOpen records a reputation lookup that errored and was
-// allowed through (fail-open) — a silent-bypass signal for operators.
-func (r *Recorder) ReputationFailedOpen(endpoint string) {
+// CheckFailedOpen records a spam check whose provider errored and was
+// allowed through (fail-open) — a silent-bypass signal. check is the
+// operator-facing check name ("reputation", "captcha"), never submitter
+// content (NFR24).
+func (r *Recorder) CheckFailedOpen(endpoint, check string) {
 	if r == nil {
 		return
 	}
-	r.reputationFailedOpen.Inc(endpoint)
+	r.checkFailedOpen.Inc(endpoint, check)
 }
 
 // ValidationFailed records a 422 response for required-fields or
