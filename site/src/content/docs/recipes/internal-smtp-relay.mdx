@@ -139,7 +139,7 @@ This recipe extends directly to any app that speaks SMTP and can be configured t
 | **Ghost** | `mail.options.host=posthorn`, `mail.options.port=2525`, `mail.options.secure=false` (no auth) |
 | **Mastodon** | `SMTP_SERVER=posthorn`, `SMTP_PORT=2525`, `SMTP_AUTH_METHOD=none`, `SMTP_OPENSSL_VERIFY_MODE=none`, `SMTP_TLS=false` |
 | **Authentik** | `email.host=posthorn`, `email.port=2525`, `email.use_tls=false` (leave user/password blank) |
-| **Vaultwarden** | `SMTP_HOST=posthorn`, `SMTP_PORT=2525`, `SMTP_SECURITY=off` |
+| [**Vaultwarden**](/recipes/vaultwarden/) | `SMTP_HOST=posthorn`, `SMTP_PORT=2525`, `SMTP_SECURITY=off` |
 | **Healthchecks.io** | `EMAIL_HOST=posthorn`, `EMAIL_PORT=2525`, `EMAIL_USE_TLS=False` |
 
 All of them benefit from the same model: one Posthorn config, one set of provider credentials, one place to rotate keys and tail logs. The apps don't need to know which provider Posthorn forwards to.

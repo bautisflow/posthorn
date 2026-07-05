@@ -1,0 +1,96 @@
+---
+title: Self-hosted Vaultwarden via Posthorn
+description: Route Vaultwarden's transactional mail (new-device login alerts, email verification, organization invites, email 2FA) through Posthorn's SMTP listener, so your password manager reaches a transactional provider without the host needing outbound SMTP or your provider credentials.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+You're running [Vaultwarden](https://github.com/dani-garcia/vaultwarden), the lightweight Bitwarden-compatible server. It sends email for new-device login notifications, email verification, organization invitations, emergency access, and email 2FA. On a cloud host that blocks outbound SMTP — or when you'd rather not hand your password manager the provider credentials — Posthorn's SMTP listener accepts Vaultwarden's connection on a private Docker network and forwards over HTTPS to whichever transactional provider you've chosen.
+
+**At the end:** Vaultwarden talks to `posthorn:2525` over a private Docker network with no TLS and no AUTH, and Posthorn forwards via the configured HTTP transport to Postmark, Resend, Mailgun, or SES.
+
+## The shape
+
+```d2
+direction: right
+host: Docker host {
+  vaultwarden: "Vaultwarden"
+  posthorn: "Posthorn\nSMTP listener (auth=none)"
+  vaultwarden -> posthorn: "SMTP on posthorn:2525\n(internal network)"
+}
+provider: "Postmark · Resend\nMailgun · SES"
+host.posthorn -> provider: HTTPS
+```
+
+## Walkthrough
+
+<Steps>
+
+1. **Put Posthorn and Vaultwarden on the same private Docker network** (no `ports:` exposure for Posthorn — see the [Authentik recipe](/recipes/authentik/) for the identical Posthorn service block):
+
+   ```yaml
+   # docker-compose.yml (excerpt)
+   networks:
+     internal:
+       internal: true
+   services:
+     vaultwarden:
+       image: vaultwarden/server:latest
+       restart: unless-stopped
+       networks: [internal]
+       # ... your volumes, DOMAIN, ADMIN_TOKEN, etc. ...
+   ```
+
+2. **Write `posthorn.toml`.**
+
+   ```toml
+   [smtp_listener]
+   listen          = ":2525"
+   auth_required   = "none"
+   require_tls     = false
+   trusted_network = true            # required for auth "none" on a container bind (#41)
+   allowed_senders = ["*@yourdomain.com"]
+
+   [smtp_listener.transport]
+   type = "postmark"
+
+   [smtp_listener.transport.settings]
+   api_key = "${env.POSTMARK_API_KEY}"
+   ```
+
+3. **Point Vaultwarden at Posthorn** via environment. Vaultwarden enables SMTP as soon as `SMTP_HOST` and `SMTP_FROM` are set:
+
+   ```yaml
+   environment:
+     SMTP_HOST:      posthorn
+     SMTP_PORT:      "2525"
+     SMTP_SECURITY:  "off"                       # plaintext on the internal network — no STARTTLS
+     SMTP_FROM:      "vaultwarden@yourdomain.com"
+     SMTP_FROM_NAME: "Vaultwarden"
+     # SMTP_USERNAME / SMTP_PASSWORD intentionally unset — the listener performs no AUTH
+   ```
+
+   <Aside type="caution" title="Set SMTP_PORT explicitly">
+   Vaultwarden's default port depends on `SMTP_SECURITY`: `starttls` → 587, `force_tls` → 465, `off` → **25**. With `SMTP_SECURITY = "off"` you must set `SMTP_PORT = "2525"`, or Vaultwarden silently dials port 25 and the mail never reaches Posthorn.
+   </Aside>
+
+4. **Test from the admin panel.** With `ADMIN_TOKEN` set, open `/admin` → **SMTP Email Settings** → *Send test email*. Posthorn logs the session:
+
+   ```json
+   {"msg":"smtp_session_open","ingress":"smtp","tls":"no"}
+   {"msg":"smtp_submission_sent","transport_message_id":"..."}
+   ```
+
+</Steps>
+
+## Common gotchas
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Vaultwarden log: `Connection refused` connecting to SMTP | Mail dialed port 25, not 2525 | Set `SMTP_PORT="2525"` explicitly — with `SMTP_SECURITY=off` the default is 25 |
+| TLS / STARTTLS handshake error in the Vaultwarden log | `SMTP_SECURITY` still `starttls` or `force_tls` | Set `SMTP_SECURITY="off"`; the listener runs plaintext on the internal network |
+| `550 5.7.1 Sender not authorized` from Posthorn | `SMTP_FROM` domain isn't in `allowed_senders` | Add `*@yourdomain.com` (or the exact address) |
+| No *Send test email* button | Admin panel disabled | Set `ADMIN_TOKEN` (argon2 hash recommended) and reload `/admin` |
+| Test email works but verification links are wrong | `DOMAIN` unset or wrong | Set `DOMAIN=https://vault.yourdomain.com` — it drives the links inside the mail, not the SMTP path |
+
+Only the mail path runs through Posthorn; `DOMAIN`, `ADMIN_TOKEN`, and the rest of Vaultwarden's config are unchanged. See [Internal SMTP relay](/recipes/internal-smtp-relay/) for the trust model behind `auth_required = "none"`.

@@ -106,6 +106,7 @@ export default defineConfig({
             { label: 'Self-hosted Ghost', slug: 'recipes/ghost' },
             { label: 'Self-hosted Authentik', slug: 'recipes/authentik' },
             { label: 'Self-hosted Mastodon', slug: 'recipes/mastodon' },
+            { label: 'Self-hosted Vaultwarden', slug: 'recipes/vaultwarden' },
             { label: 'Weekly Umami digest (API mode)', slug: 'recipes/umami' },
           ],
         },
