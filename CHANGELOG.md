@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [1.2.0] — 2026-07-04
+
+Spam-protection minor. Adds three content-agnostic checks that target automated contact-form spam — the kind that fills valid-looking fields, varies its wording and language, and reuses throwaway sender addresses, so there's no content signature to match. All are opt-in, form-mode only, and backwards-compatible; existing configs are unaffected.
+
+### Added
+
+- **Reputation check ([#44](https://github.com/craigmccaskill/posthorn/issues/44)).** Optional `[endpoints.reputation]` — a StopForumSpam lookup on the submitter email and/or IP before send, blocking known form-spam identities regardless of message content or language. Bounded LRU result cache; fails open by default so a provider outage never blocks real mail (fail-open events increment `posthorn_check_failed_open_total{check="reputation"}`). Sends email+IP to a third party — opt-in.
+- **Proof-of-browser check ([#45](https://github.com/craigmccaskill/posthorn/issues/45), ADR-18).** Optional `[endpoints.proof_of_browser]` — Posthorn serves a challenge token from a `GET` on the endpoint that only page JavaScript can fetch and inject as `_pob_token`, blocking bots that POST the form directly. An optional `min_age` time-trap rejects impossibly-fast submissions. No third party; works on static sites.
+- **Captcha check ([#33](https://github.com/craigmccaskill/posthorn/issues/33)).** Optional `[endpoints.captcha]` — Cloudflare Turnstile verification, the escalation tier for bots that render a real browser. Byte-identical silent 200 on a rejected token; fails closed by default on a provider outage.
+- New `posthorn_check_failed_open_total{endpoint,check}` metric and `spam_blocked` kinds `reputation` / `proof_of_browser` / `captcha`.
+
+### Changed
+
+- The three spam checks (origin, honeypot, CSRF) were refactored into a two-phase pipeline ([#60](https://github.com/craigmccaskill/posthorn/issues/60)): header checks pre-parse, form checks post-parse, each producing a `spam.Verdict` the handler renders through one mapping. No behavior change — the extraction is what let the three new checks land as small additions rather than more inline blocks.
+
 ## [1.1.0] — 2026-07-04
 
 A security-hardening and operational-maturity release, from a full audit of the shipped v1.0. One breaking change (below) that closes an open-relay footgun; everything else is additive or a fix.
