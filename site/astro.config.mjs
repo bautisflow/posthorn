@@ -86,6 +86,7 @@ export default defineConfig({
             { label: 'Rate limiting', slug: 'features/rate-limiting' },
             { label: 'Validation', slug: 'features/validation' },
             { label: 'Templating', slug: 'features/templating' },
+            { label: 'HTML email bodies', slug: 'features/html-body' },
             { label: 'Retry policy', slug: 'features/retry-policy' },
             { label: 'Structured logging', slug: 'features/logging' },
             { label: 'API mode', slug: 'features/api-mode' },

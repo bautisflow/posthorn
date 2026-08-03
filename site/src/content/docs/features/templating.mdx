@@ -7,6 +7,10 @@ import { Aside } from '@astrojs/starlight/components';
 
 Posthorn uses Go's `text/template` package to render email subjects and bodies. Form fields are exposed to the template as variables, and any field not explicitly named in your config gets appended to a structured "Additional fields" block at the bottom of the body.
 
+<Aside type="tip">
+Want styled mail with clickable buttons? See [HTML email bodies](/features/html-body/) — the same templating with `body_format = "html"`, automatic escaping, and a derived plain-text part. (v2.0+)
+</Aside>
+
 ## Subject
 
 ```toml
