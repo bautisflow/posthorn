@@ -67,7 +67,7 @@ type Handler struct {
 	cfg                  config.EndpointConfig
 	transport            transport.Transport
 	renderer             *template.Renderer
-	storageGate          *storage.Gate // nil = no [storage]; v1.x behavior
+	storageGate          *storage.Gate      // nil = no [storage]; v1.x behavior
 	limiter              *ratelimit.Limiter // nil if rate_limit not configured
 	authFailLimiter      *ratelimit.Limiter // nil on form-mode endpoints; per-IP brute-force defense for api-mode 401s
 	idemCache            idempotency.Cacher // nil on form-mode endpoints; Durable when storage attached (FR81)
@@ -1078,7 +1078,6 @@ func storableFields(form map[string][]string, honeypot string) map[string][]stri
 	}
 	return out
 }
-
 
 // writeSuccessResponse emits a 200 response. When `redirect_success` is
 // configured on the endpoint AND the request's Accept header prefers HTML

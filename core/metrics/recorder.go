@@ -30,12 +30,12 @@ type Recorder struct {
 	sendLatency      *Histogram
 
 	// v2.0 storage surface (FR78, FR80).
-	queued           *Counter
-	queueSent        *Counter
-	queueRetried     *Counter
-	queueDeadLetter  *Counter
-	storageHealthy   *Gauge
-	retryQueueDepth  *Gauge
+	queued          *Counter
+	queueSent       *Counter
+	queueRetried    *Counter
+	queueDeadLetter *Counter
+	storageHealthy  *Gauge
+	retryQueueDepth *Gauge
 }
 
 // NewRecorder constructs a Recorder backed by counters and histograms
