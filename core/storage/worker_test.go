@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -194,6 +195,46 @@ func TestWorker_ExhaustsLadderThenDeadLetters(t *testing.T) {
 	}
 	if dead != 1 {
 		t.Errorf("OnDeadLetter = %d", dead)
+	}
+}
+
+func TestCrashMidSend_WorkerReplaysAfterReopen(t *testing.T) {
+	// The Story 14.6 end-to-end: a submission recorded pre-send (as the
+	// gateway does), process dies before the outcome lands, restart
+	// recovers it into the queue, the worker replays it, mail delivers.
+	// This is the at-least-once path in full (NFR28).
+	path := filepath.Join(t.TempDir(), "posthorn.db")
+	s1, err := Open(Config{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.RecordSubmission(sampleSubmission("sub-crash", StatusSending)); err != nil {
+		t.Fatal(err)
+	}
+	_ = s1.Close() // crash mid-send
+
+	s2, err := Open(Config{Path: path}) // restart: recovery runs
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	f := &fakeSender{}
+	w := newWorker(s2, f, t0) // recovery is immediately due
+	w.ProcessDue(context.Background(), Hooks{})
+
+	if len(f.calls) != 1 {
+		t.Fatalf("replay sends = %d, want 1", len(f.calls))
+	}
+	if f.calls[0].Subject != "Hello" || f.calls[0].BodyHTML == "" {
+		t.Errorf("replayed message lost content: %+v", f.calls[0])
+	}
+	got, _, _ := s2.GetSubmission("sub-crash")
+	if got.Status != StatusSent {
+		t.Errorf("status = %q after replay", got.Status)
+	}
+	if n, _ := s2.QueueDepth(); n != 0 {
+		t.Errorf("queue depth = %d", n)
 	}
 }
 

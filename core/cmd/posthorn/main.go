@@ -182,6 +182,11 @@ func runServe(args []string) error {
 		if err != nil {
 			return fmt.Errorf("build smtp_listener: %w", err)
 		}
+		if gate != nil {
+			if l, ok := smtpIng.(*smtp.Listener); ok {
+				l.AttachStorage(gate)
+			}
+		}
 		ingresses = append(ingresses, smtpIng)
 		transports[smtpListenerEndpoint] = smtpTransport
 		logger.Info("smtp_listener registered",

@@ -17,6 +17,7 @@ import (
 
 	uuid "github.com/google/uuid"
 
+	"github.com/craigmccaskill/posthorn/storage"
 	"github.com/craigmccaskill/posthorn/transport"
 )
 
@@ -402,9 +403,39 @@ func (s *session) handleDATA() {
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
 	submissionID := uuid.NewString()
+
+	// FR77: persist pre-send (status "sending") so a crash mid-send is
+	// recoverable (NFR28). Best-effort; degraded storage never blocks.
+	persisted, queueable := s.recordSubmission(submissionID, msg)
+
 	sendStart := time.Now()
 	result, sendErr := transport.SendWithRetry(ctx, s.l.transport, msg, s.logger)
 	if sendErr != nil {
+		// FR78: with storage available, transient exhaustion queues and
+		// the relay OWNS the retry — reply 250, because a 451 would make
+		// the client retry a send Posthorn is already going to retry,
+		// double-sending when both succeed.
+		if queueable && transport.IsRetryable(sendErr) {
+			if qerr := s.l.gate.Store().Enqueue(submissionID, time.Now()); qerr != nil {
+				s.l.gate.ReportError(qerr)
+			} else {
+				_ = s.writeReply(250, "2.0.0 OK accepted for retry as "+submissionID)
+				s.logger.Warn("smtp_submission_queued",
+					slog.String("submission_id", submissionID),
+					slog.String("error", sendErr.Error()),
+				)
+				if s.l.recorder != nil {
+					s.l.recorder.Queued(smtpEndpointLabel, s.l.cfg.Transport.Type)
+				}
+				s.resetTransaction()
+				return
+			}
+		}
+		if persisted {
+			if serr := s.l.gate.Store().MarkStatus(submissionID, storage.StatusFailed, sendErr.Error()); serr != nil {
+				s.l.gate.ReportError(serr)
+			}
+		}
 		_ = s.writeReply(451, "4.0.0 Upstream transport failed")
 		s.logger.Error("smtp_submission_failed",
 			slog.String("submission_id", submissionID),
@@ -413,6 +444,11 @@ func (s *session) handleDATA() {
 		s.recordSendFailed(sendErr)
 		s.resetTransaction()
 		return
+	}
+	if persisted {
+		if serr := s.l.gate.Store().MarkSent(submissionID, result.MessageID, time.Now()); serr != nil {
+			s.l.gate.ReportError(serr)
+		}
 	}
 	_ = s.writeReply(250, "2.0.0 OK queued as "+submissionID)
 	s.logger.Info("smtp_submission_sent",
@@ -424,13 +460,51 @@ func (s *session) handleDATA() {
 	s.resetTransaction()
 }
 
+// recordSubmission persists the pre-send row for an SMTP submission
+// (FR77). SMTP has no form fields and no strip_client_ip knob; the
+// session's remote IP is recorded, matching the NFR23 session log.
+func (s *session) recordSubmission(id string, msg transport.Message) (persisted, queueable bool) {
+	g := s.l.gate
+	if g == nil || !g.Healthy() {
+		return false, false
+	}
+	host, _, err := net.SplitHostPort(s.conn.RemoteAddr().String())
+	if err != nil {
+		host = s.conn.RemoteAddr().String()
+	}
+	sub := storage.Submission{
+		ID:        id,
+		Endpoint:  smtpEndpointLabel,
+		Transport: s.l.cfg.Transport.Type,
+		From:      msg.From,
+		ToAddrs:   msg.To,
+		ReplyTo:   msg.ReplyTo,
+		Subject:   msg.Subject,
+		BodyText:  msg.BodyText,
+		BodyHTML:  msg.BodyHTML,
+		ClientIP:  host,
+		Status:    storage.StatusSending,
+		CreatedAt: time.Now(),
+	}
+	if err := g.Store().RecordSubmission(sub); err != nil {
+		g.ReportError(err)
+		return false, false
+	}
+	return true, true
+}
+
+// smtpEndpointLabel is the endpoint label for metrics and the
+// submission log — the SMTP listener has no HTTP path. Matches the
+// constant in cmd/posthorn's worker transport map.
+const smtpEndpointLabel = "smtp_listener"
+
 func (s *session) recordSendOk(latency time.Duration) {
 	if s.l.recorder == nil {
 		return
 	}
 	// The "smtp_listener" endpoint label lets operators split
 	// inbound-via-HTTP from inbound-via-SMTP in metrics.
-	s.l.recorder.Sent("smtp_listener", s.l.cfg.Transport.Type, latency)
+	s.l.recorder.Sent(smtpEndpointLabel, s.l.cfg.Transport.Type, latency)
 }
 
 func (s *session) recordSendFailed(err error) {

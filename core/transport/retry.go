@@ -85,3 +85,15 @@ func SendWithRetry(ctx context.Context, t Transport, msg Message, logger *slog.L
 	)
 	return SendResult{}, retryErr
 }
+
+// IsRetryable reports whether err carries a transient or rate-limited
+// classification — the classes eligible for another attempt (FR19-22)
+// and for the v2.0 background queue (FR78). Bare non-TransportError
+// values are not retryable (contract bug; treated terminal).
+func IsRetryable(err error) bool {
+	var terr *TransportError
+	if !errors.As(err, &terr) {
+		return false
+	}
+	return terr.Class == ErrTransient || terr.Class == ErrRateLimited
+}

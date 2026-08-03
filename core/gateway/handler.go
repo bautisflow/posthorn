@@ -945,7 +945,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// FR78/ADR-21: transient exhaustion with storage available moves
 		// the submission to the background queue instead of dropping it.
 		// Terminal errors never queue — retrying them is noise.
-		if queueable && retryableClass(err) {
+		if queueable && transport.IsRetryable(err) {
 			if qerr := h.storageGate.Store().Enqueue(submissionID, time.Now()); qerr != nil {
 				h.storageGate.ReportError(qerr)
 			} else {
@@ -1079,16 +1079,6 @@ func storableFields(form map[string][]string, honeypot string) map[string][]stri
 	return out
 }
 
-// retryableClass reports whether err is a transient/rate-limited
-// transport failure — the only classes eligible for the background
-// queue (FR78).
-func retryableClass(err error) bool {
-	var terr *transport.TransportError
-	if !errors.As(err, &terr) {
-		return false
-	}
-	return terr.Class == transport.ErrTransient || terr.Class == transport.ErrRateLimited
-}
 
 // writeSuccessResponse emits a 200 response. When `redirect_success` is
 // configured on the endpoint AND the request's Accept header prefers HTML
