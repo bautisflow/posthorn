@@ -215,6 +215,15 @@ CREATE TABLE IF NOT EXISTS canary (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS lifecycle_queue (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  endpoint        TEXT NOT NULL,
+  payload         BLOB NOT NULL,
+  attempt         INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_due ON lifecycle_queue(next_attempt_at);
 `
 
 // recoverInFlight moves crash-window rows ("sending" at open) into the
