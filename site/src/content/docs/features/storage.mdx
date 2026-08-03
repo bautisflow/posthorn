@@ -1,0 +1,76 @@
+---
+title: Storage & reliability
+description: The optional SQLite layer — submission log, retry queue across restarts, durable idempotency — and what living on disk means.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note">Available from **v2.0**. Entirely optional: without a `[storage]` block, Posthorn behaves exactly like v1.x — nothing touches disk.</Aside>
+
+```toml
+[storage]
+path      = "/var/lib/posthorn/posthorn.db"
+retention = "30d"     # default; how long completed submissions stay queryable
+max_size  = "1GB"     # default; hard cap on the database file
+```
+
+One SQLite file, one Posthorn instance. The file must not be shared between concurrent instances.
+
+## What you get
+
+**A submission log.** Every submission persists: envelope, rendered bodies, raw form fields, status (`sent`, `queued`, `failed`, `suppressed`), the provider's message ID, timestamps. Query it with the stock tooling:
+
+```bash
+sqlite3 /var/lib/posthorn/posthorn.db \
+  "SELECT id, endpoint, status, created_at FROM submissions ORDER BY created_at DESC LIMIT 20"
+```
+
+**A retry queue that survives restarts.** In v1.x, a send that failed transiently (provider 5xx, network blip) after its inline retries was dropped — recoverable only from logs. With storage, that send enters a background queue and retries with backoff (1m, 4m, 16m, ~1h, ~4h) before being marked `failed`.
+
+**Durable idempotency.** API-mode `Idempotency-Key` responses survive restarts: a client retrying across a Posthorn redeploy gets the byte-identical cached response instead of a double-send.
+
+**The [suppression list](/features/lifecycle/#automatic-suppression).**
+
+## What 200 still means
+
+The response contract does not soften: **200 means sent**, and a 502 means terminally failed. The new state is additive — when inline retries exhaust on a *transient* failure (where v1.x dropped the mail), API-mode callers now receive:
+
+```json
+HTTP 202
+{"status": "queued", "submission_id": "0d5aa9c8-..."}
+```
+
+Any 2xx means *terminally handled — do not retry*. Form-mode submitters see the normal success response, and the SMTP listener answers `250` (the relay owns the retry). Track the eventual outcome by `submission_id` in the log, or via [lifecycle events](/features/lifecycle/).
+
+One honest caveat: queued delivery is **at-least-once**. If Posthorn crashes in the window between the provider accepting a send and Posthorn recording that fact, recovery re-sends. Duplicates are rare and bounded to crashes, but receivers that must deduplicate can key on the message content or your own idempotency scheme.
+
+## Failure posture: mail first
+
+Storage failure never blocks mail. A canary write probes the full disk path every 15 seconds; if it fails, Posthorn degrades to v1.x synchronous behavior — mail keeps flowing, nothing persists, no 202s are offered — and tells you loudly:
+
+- `/healthz` reports `{"status":"ok","storage":"degraded"}` (still HTTP 200 — a degraded disk is not a liveness failure and a restart wouldn't help)
+- `posthorn_storage_healthy` drops to 0
+- a `storage_degraded` log event fires on the transition, `storage_recovered` when the probe passes again
+
+Posthorn also cannot fill your disk: `max_size` is enforced inside SQLite (`max_page_count`), so the file stops growing at the cap while retention pruning keeps working. If some *other* process fills the volume to 100%, mail still flows in degraded mode until space is freed.
+
+## Data at rest — read this before enabling
+
+The storage file changes Posthorn's privacy posture, deliberately and visibly:
+
+**What's in the file.** Submitter PII: names, email addresses, message bodies (text and HTML), raw form fields, and client IPs — for up to `retention` (30 days by default). Suppression rows hold email addresses **indefinitely** by design: they're consent/deliverability memory, and forgetting a bounce defeats the feature.
+
+**What respects your existing flags.** `strip_client_ip = true` keeps IPs out of storage rows just as it keeps them out of logs. `log_failed_submissions = false` endpoints store metadata only (no bodies, no fields) — and consequently can't use the retry queue, since queueing *is* persisting submitter content.
+
+**The file is a theft target.** Treat it like a database, because it is one:
+
+- Own it with the Posthorn user, mode `0600`; same for the `-wal`/`-shm` siblings and the containing directory
+- Put it on an encrypted volume if the host is shared or physical access is a concern
+- Back it up like data, restore-test it, and remember backups extend the retention window in practice
+- Never expose the path via a web root or a container volume mounted elsewhere
+
+**Erasure.** Retention pruning handles submissions automatically. For a specific person: `posthorn suppressions remove <email>` clears suppression rows, and `sqlite3` deletes submission rows directly — `DELETE FROM submissions WHERE to_addrs LIKE '%person@example.com%';`
+
+## Sizing
+
+Text-only submissions are ~1-4KB each; HTML bodies grow with your templates; attachments (v2.0) persist as blobs while queued. The 1GB default holds months of typical contact-form traffic. Watch `posthorn_retry_queue_depth` — a rising queue with a full disk cap is the one state where mail can be accepted-then-dead-lettered for space.
