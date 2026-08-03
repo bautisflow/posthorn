@@ -32,6 +32,7 @@ import (
 	"github.com/craigmccaskill/posthorn/metrics"
 	"github.com/craigmccaskill/posthorn/smtp"
 	"github.com/craigmccaskill/posthorn/spam"
+	"github.com/craigmccaskill/posthorn/storage"
 	"github.com/craigmccaskill/posthorn/transport"
 )
 
@@ -114,7 +115,35 @@ func runServe(args []string) error {
 	metricsReg := metrics.New()
 	recorder := metrics.NewRecorder(metricsReg)
 
-	mux, err := buildMux(cfg, logger, metricsReg, recorder)
+	// v2.0: optional storage spine (FR76). Presence-activates (NFR25);
+	// without [storage] the gate stays nil and every path is v1.x.
+	var gate *storage.Gate
+	if cfg.Storage != nil {
+		maxSize, err := spam.ParseSize(cfg.Storage.EffectiveMaxSize())
+		if err != nil {
+			return fmt.Errorf("storage.max_size: %w", err)
+		}
+		store, err := storage.Open(storage.Config{
+			Path:      cfg.Storage.Path,
+			InMemory:  cfg.Storage.InMemory,
+			Retention: cfg.Storage.EffectiveRetention(),
+			MaxSize:   maxSize,
+		})
+		if err != nil {
+			return fmt.Errorf("open storage: %w", err)
+		}
+		defer func() { _ = store.Close() }()
+		gate = storage.NewGate(store, logger)
+		recorder.SetStorageHealthy(true)
+		logger.Info("storage_enabled",
+			slog.String("path", cfg.Storage.Path),
+			slog.Bool("in_memory", cfg.Storage.InMemory),
+			slog.Duration("retention", cfg.Storage.EffectiveRetention()),
+			slog.String("max_size", cfg.Storage.EffectiveMaxSize()),
+		)
+	}
+
+	mux, transports, err := buildMux(cfg, logger, metricsReg, recorder, gate)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -149,11 +178,12 @@ func runServe(args []string) error {
 	// v1.0 block D: optional SMTP listener (FR62). Built only when the
 	// operator's TOML includes [smtp_listener].
 	if cfg.SMTPListener != nil {
-		smtpIng, err := buildSMTPIngress(cfg.SMTPListener, logger, recorder)
+		smtpIng, smtpTransport, err := buildSMTPIngress(cfg.SMTPListener, logger, recorder)
 		if err != nil {
 			return fmt.Errorf("build smtp_listener: %w", err)
 		}
 		ingresses = append(ingresses, smtpIng)
+		transports[smtpListenerEndpoint] = smtpTransport
 		logger.Info("smtp_listener registered",
 			slog.String("listen", cfg.SMTPListener.Listen),
 			slog.String("transport", cfg.SMTPListener.Transport.Type),
@@ -161,17 +191,60 @@ func runServe(args []string) error {
 		)
 	}
 
+	// v2.0: background retry worker + storage maintenance (FR78-FR80).
+	// Both stop when the ingresses shut down.
+	if gate != nil {
+		ctx, stop := context.WithCancel(context.Background())
+		defer stop()
+		worker := &storage.Worker{
+			Store:  gate.Store(),
+			Send:   queuedSendFunc(transports),
+			Logger: logger,
+		}
+		go worker.Run(ctx, storage.Hooks{
+			OnSent:       recorder.QueueSent,
+			OnRetryAgain: recorder.QueueRetried,
+			OnDeadLetter: recorder.QueueDeadLettered,
+		})
+		go gate.RunMaintenance(ctx, 0, 0, cfg.Storage.EffectiveRetention(), storage.MaintenanceHooks{
+			OnHealth: recorder.SetStorageHealthy,
+			OnDepth:  recorder.SetQueueDepth,
+		})
+	}
+
 	return runIngressesUntilSignal(ingresses, logger)
+}
+
+// smtpListenerEndpoint is the submission-log endpoint label for mail
+// accepted by the SMTP listener (it has no HTTP path).
+const smtpListenerEndpoint = "smtp_listener"
+
+// queuedSendFunc resolves a queued submission's endpoint back to its
+// transport. An endpoint that no longer exists in the config (edited
+// between restarts) yields a terminal error, which dead-letters the
+// row rather than looping forever.
+func queuedSendFunc(transports map[string]transport.Transport) storage.SendFunc {
+	return func(ctx context.Context, endpoint string, msg transport.Message) (transport.SendResult, error) {
+		t, ok := transports[endpoint]
+		if !ok {
+			return transport.SendResult{}, &transport.TransportError{
+				Class:   transport.ErrTerminal,
+				Message: fmt.Sprintf("endpoint %q no longer configured", endpoint),
+			}
+		}
+		return t.Send(ctx, msg)
+	}
 }
 
 // buildSMTPIngress converts the config-package SMTPListenerConfig into
 // the smtp-package ListenerConfig, constructs the outbound transport
 // via the same registry the HTTP endpoints use, and returns the
-// resulting smtp.Listener (which satisfies ingress.Ingress).
-func buildSMTPIngress(c *config.SMTPListenerConfig, logger *slog.Logger, recorder *metrics.Recorder) (ingress.Ingress, error) {
+// resulting smtp.Listener (which satisfies ingress.Ingress) plus the
+// transport itself (the retry worker needs it to replay queued rows).
+func buildSMTPIngress(c *config.SMTPListenerConfig, logger *slog.Logger, recorder *metrics.Recorder) (ingress.Ingress, transport.Transport, error) {
 	tp, err := buildTransport(c.Transport)
 	if err != nil {
-		return nil, fmt.Errorf("transport: %w", err)
+		return nil, nil, fmt.Errorf("transport: %w", err)
 	}
 	// Parse max_message_size (default 1MB if unset).
 	rawSize := c.MaxMessageSize
@@ -180,7 +253,7 @@ func buildSMTPIngress(c *config.SMTPListenerConfig, logger *slog.Logger, recorde
 	}
 	maxBody, err := spam.ParseSize(rawSize)
 	if err != nil {
-		return nil, fmt.Errorf("max_message_size: %w", err)
+		return nil, nil, fmt.Errorf("max_message_size: %w", err)
 	}
 	listenerCfg := smtp.ListenerConfig{
 		Listen:                  c.Listen,
@@ -203,9 +276,13 @@ func buildSMTPIngress(c *config.SMTPListenerConfig, logger *slog.Logger, recorde
 		listenerCfg.SMTPUsers[i] = smtp.User{Username: u.Username, Password: u.Password}
 	}
 	if err := listenerCfg.Validate(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return smtp.New(listenerCfg, tp, maxBody, logger, recorder)
+	ing, err := smtp.New(listenerCfg, tp, maxBody, logger, recorder)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ing, tp, nil
 }
 
 // runIngressesUntilSignal starts each ingress in its own goroutine,
@@ -295,7 +372,7 @@ func runValidate(args []string) error {
 	// buildSMTPIngress, not config.Load — so without this a listener-only
 	// config that passes `validate` could still fail at `serve`.
 	if cfg.SMTPListener != nil {
-		if _, err := buildSMTPIngress(cfg.SMTPListener, buildLogger(cfg.Logging), nil); err != nil {
+		if _, _, err := buildSMTPIngress(cfg.SMTPListener, buildLogger(cfg.Logging), nil); err != nil {
 			return fmt.Errorf("smtp_listener: %w", err)
 		}
 	}
@@ -318,21 +395,26 @@ func runValidate(args []string) error {
 // The mux additionally registers `/healthz` (FR54) and `/metrics`
 // (FR55) at fixed paths. Operators can firewall those paths at the
 // reverse proxy if internal-only access is desired.
-func buildMux(cfg *config.Config, logger *slog.Logger, metricsReg *metrics.Registry, recorder *metrics.Recorder) (*http.ServeMux, error) {
+func buildMux(cfg *config.Config, logger *slog.Logger, metricsReg *metrics.Registry, recorder *metrics.Recorder, gate *storage.Gate) (*http.ServeMux, map[string]transport.Transport, error) {
 	mux := http.NewServeMux()
+	transports := make(map[string]transport.Transport, len(cfg.Endpoints))
 
 	for i, ep := range cfg.Endpoints {
 		t, err := buildTransport(ep.Transport)
 		if err != nil {
-			return nil, fmt.Errorf("endpoints[%d] (%s): transport: %w", i, ep.Path, err)
+			return nil, nil, fmt.Errorf("endpoints[%d] (%s): transport: %w", i, ep.Path, err)
 		}
 		h, err := gateway.New(ep, t,
 			gateway.WithLogger(logger),
 			gateway.WithRecorder(recorder),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("endpoints[%d] (%s): %w", i, ep.Path, err)
+			return nil, nil, fmt.Errorf("endpoints[%d] (%s): %w", i, ep.Path, err)
 		}
+		if gate != nil {
+			h.AttachStorage(gate)
+		}
+		transports[ep.Path] = t
 		mux.Handle(ep.Path, h)
 		logger.Info("endpoint registered",
 			slog.String("path", ep.Path),
@@ -341,13 +423,19 @@ func buildMux(cfg *config.Config, logger *slog.Logger, metricsReg *metrics.Regis
 		)
 	}
 
-	// FR54: /healthz — always-on liveness probe.
-	mux.Handle("/healthz", metrics.HealthzHandler())
+	// FR54: /healthz — always-on liveness probe. With storage configured
+	// it also reports the canary state (FR80); always 200 because a
+	// degraded disk doesn't stop mail flow (NFR27).
+	var storageState metrics.StorageState
+	if gate != nil {
+		storageState = gate.Healthy
+	}
+	mux.Handle("/healthz", metrics.HealthzHandlerWithStorage(storageState))
 	// FR55: /metrics — Prometheus exposition. Same registry as the
 	// Recorder above so all observations land in the scrape.
 	mux.Handle("/metrics", metricsReg.Handler())
 
-	return mux, nil
+	return mux, transports, nil
 }
 
 // buildTransport constructs a transport from its config block. Dispatch

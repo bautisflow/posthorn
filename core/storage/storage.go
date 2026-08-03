@@ -362,6 +362,41 @@ func (s *Store) scanOne(where string, args ...any) (Submission, bool, error) {
 	return sub, true, nil
 }
 
+// ListSubmissions returns up to limit rows, newest first — FR77's
+// "queryable" acceptance. Serves tests today and the CLI/admin surface
+// later; operators can always query the file directly with sqlite3.
+func (s *Store) ListSubmissions(limit int) ([]Submission, error) {
+	rows, err := s.db.Query(
+		`SELECT id FROM submissions ORDER BY created_at DESC, id LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list submissions: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("storage: list submissions: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list submissions: %w", err)
+	}
+	subs := make([]Submission, 0, len(ids))
+	for _, id := range ids {
+		sub, ok, err := s.GetSubmission(id)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			subs = append(subs, sub)
+		}
+	}
+	return subs, nil
+}
+
 // Prune deletes submission rows older than cutoff (FR79). Pending work
 // ("sending"/"queued") survives regardless of age; suppressions are a
 // different table and deliberately never pruned (ADR-23); idempotency

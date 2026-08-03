@@ -9,10 +9,38 @@ import (
 // rate-limit-free; operators concerned about exposure firewall the path
 // at the reverse proxy (FR54).
 func HealthzHandler() http.Handler {
+	return HealthzHandlerWithStorage(nil)
+}
+
+// StorageState reports the storage layer's current health for /healthz
+// (FR80). Wired by cmd/posthorn when a [storage] block is configured.
+type StorageState func() (healthy bool)
+
+// HealthzHandlerWithStorage extends /healthz with the storage canary
+// state. With a nil state func the response is the v1.x plain-text "ok",
+// byte-identical. With storage configured the body becomes JSON:
+//
+//	{"status":"ok","storage":"ok"}      — canary passing
+//	{"status":"ok","storage":"degraded"} — canary failing
+//
+// The HTTP status stays 200 in both cases: a degraded disk does not
+// stop mail flow (NFR27), so it must not fail liveness probes and cause
+// restarts that wouldn't help.
+func HealthzHandlerWithStorage(state StorageState) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if state == nil {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		storage := "ok"
+		if !state() {
+			storage = "degraded"
+		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+		_, _ = w.Write([]byte(`{"status":"ok","storage":"` + storage + `"}`))
 	})
 }
 
