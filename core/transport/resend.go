@@ -71,6 +71,7 @@ type resendRequest struct {
 	ReplyTo string   `json:"reply_to,omitempty"`
 	Subject string   `json:"subject"`
 	Text    string   `json:"text"`
+	HTML    string   `json:"html,omitempty"`
 }
 
 // resendSuccessResponse is the 200 OK body shape. Only the message ID
@@ -103,6 +104,7 @@ func (r *ResendTransport) Send(ctx context.Context, msg Message) (SendResult, er
 		ReplyTo: msg.ReplyTo,
 		Subject: msg.Subject,
 		Text:    msg.BodyText,
+		HTML:    msg.BodyHTML,
 	}
 	buf, err := json.Marshal(body)
 	if err != nil {

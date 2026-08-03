@@ -57,6 +57,7 @@ type PreparedMessage struct {
 	ReplyTo  string   `json:"reply_to,omitempty"`
 	Subject  string   `json:"subject"`
 	BodyText string   `json:"body_text"`
+	BodyHTML string   `json:"body_html,omitempty"`
 }
 
 // WriteJSON writes body as JSON with the given status code.

@@ -96,7 +96,8 @@ type sesContentField struct {
 }
 
 type sesBody struct {
-	Text sesContentField `json:"Text"`
+	Text sesContentField  `json:"Text"`
+	Html *sesContentField `json:"Html,omitempty"`
 }
 
 // sesSuccessResponse captures the SendEmail 200 body — only the
@@ -133,6 +134,9 @@ func (s *SESTransport) Send(ctx context.Context, msg Message) (SendResult, error
 				Body:    sesBody{Text: sesContentField{Data: msg.BodyText}},
 			},
 		},
+	}
+	if msg.BodyHTML != "" {
+		payload.Content.Simple.Body.Html = &sesContentField{Data: msg.BodyHTML}
 	}
 	if msg.ReplyTo != "" {
 		payload.ReplyToAddresses = []string{msg.ReplyTo}

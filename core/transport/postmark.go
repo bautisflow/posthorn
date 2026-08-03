@@ -84,6 +84,7 @@ type postmarkRequest struct {
 	ReplyTo  string `json:"ReplyTo,omitempty"`
 	Subject  string `json:"Subject"`
 	TextBody string `json:"TextBody"`
+	HtmlBody string `json:"HtmlBody,omitempty"`
 }
 
 // postmarkResponse captures the fields we read from Postmark's JSON reply.
@@ -111,6 +112,7 @@ func (p *PostmarkTransport) Send(ctx context.Context, msg Message) (SendResult, 
 		ReplyTo:  msg.ReplyTo,
 		Subject:  msg.Subject,
 		TextBody: msg.BodyText,
+		HtmlBody: msg.BodyHTML,
 	}
 	buf, err := json.Marshal(body)
 	if err != nil {

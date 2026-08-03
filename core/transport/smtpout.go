@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"mime"
+	"mime/multipart"
 	"net"
 	"net/mail"
 	"net/smtp"
@@ -265,6 +266,12 @@ func envelopeAddress(addr string) (string, error) {
 // buildRFC5322 constructs the message body sent in DATA. Headers use
 // CRLF line endings (RFC 5322); the body's line endings are converted
 // by textproto.DotWriter inside Data().
+//
+// Text-only messages keep the v1.x single-part wire format unchanged.
+// When BodyHTML is set (FR74), the body becomes multipart/alternative
+// with the text part first — RFC 2046 §5.1.4 orders parts by increasing
+// preference, so HTML-capable clients render the HTML part and
+// text-only clients fall back to the text part.
 func (s *SMTPOutTransport) buildRFC5322(msg Message) []byte {
 	var buf bytes.Buffer
 	writeHeader(&buf, "From", msg.From)
@@ -275,10 +282,36 @@ func (s *SMTPOutTransport) buildRFC5322(msg Message) []byte {
 	writeHeader(&buf, "Subject", encodeMIMESubject(msg.Subject))
 	writeHeader(&buf, "Date", s.now().UTC().Format(time.RFC1123Z))
 	writeHeader(&buf, "MIME-Version", "1.0")
-	writeHeader(&buf, "Content-Type", "text/plain; charset=\"utf-8\"")
-	writeHeader(&buf, "Content-Transfer-Encoding", "8bit")
+
+	if msg.BodyHTML == "" {
+		writeHeader(&buf, "Content-Type", "text/plain; charset=\"utf-8\"")
+		writeHeader(&buf, "Content-Transfer-Encoding", "8bit")
+		buf.WriteString("\r\n")
+		buf.WriteString(msg.BodyText)
+		return buf.Bytes()
+	}
+
+	// multipart.Writer generates a cryptographically random boundary —
+	// structural, never derived from message content, so a body cannot
+	// terminate its own part early by containing the boundary string.
+	var parts bytes.Buffer
+	mw := multipart.NewWriter(&parts)
+	writeHeader(&buf, "Content-Type", `multipart/alternative; boundary="`+mw.Boundary()+`"`)
 	buf.WriteString("\r\n")
-	buf.WriteString(msg.BodyText)
+
+	textPart, _ := mw.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {`text/plain; charset="utf-8"`},
+		"Content-Transfer-Encoding": {"8bit"},
+	})
+	_, _ = textPart.Write([]byte(msg.BodyText))
+	htmlPart, _ := mw.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {`text/html; charset="utf-8"`},
+		"Content-Transfer-Encoding": {"8bit"},
+	})
+	_, _ = htmlPart.Write([]byte(msg.BodyHTML))
+	_ = mw.Close()
+
+	buf.Write(parts.Bytes())
 	return buf.Bytes()
 }
 

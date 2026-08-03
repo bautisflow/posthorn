@@ -908,6 +908,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				ReplyTo:  msg.ReplyTo,
 				Subject:  msg.Subject,
 				BodyText: msg.BodyText,
+				BodyHTML: msg.BodyHTML,
 			},
 		})
 		return

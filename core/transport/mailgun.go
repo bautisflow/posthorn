@@ -120,6 +120,11 @@ func (m *MailgunTransport) Send(ctx context.Context, msg Message) (SendResult, e
 	if err := mw.WriteField("text", msg.BodyText); err != nil {
 		return SendResult{}, &TransportError{Class: ErrTerminal, Cause: err, Message: "encode mailgun text"}
 	}
+	if msg.BodyHTML != "" {
+		if err := mw.WriteField("html", msg.BodyHTML); err != nil {
+			return SendResult{}, &TransportError{Class: ErrTerminal, Cause: err, Message: "encode mailgun html"}
+		}
+	}
 	if err := mw.Close(); err != nil {
 		return SendResult{}, &TransportError{Class: ErrTerminal, Cause: err, Message: "close mailgun multipart"}
 	}
