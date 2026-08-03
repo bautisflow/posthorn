@@ -9,6 +9,7 @@ import (
 	"net/mail"
 	"strings"
 
+	"github.com/craigmccaskill/posthorn/template"
 	"github.com/craigmccaskill/posthorn/transport"
 )
 
@@ -29,8 +30,11 @@ import (
 //     CRLF in those values from constructing sibling headers in the
 //     outbound message.
 //
-//   - For multipart bodies we prefer the `text/plain` part; HTML-only
-//     bodies are rejected (v2 will add HTML support).
+//   - For multipart bodies, the first `text/plain` part becomes BodyText
+//     and the first `text/html` part becomes BodyHTML (FR75). HTML-only
+//     messages — previously rejected 554 in v1.x — are accepted, with
+//     BodyText auto-derived from the HTML so the outbound mail always
+//     carries a readable text part (FR72 reuse).
 func parseMIMEToMessage(data []byte, envelopeFrom string, envelopeRcpts []string) (transport.Message, error) {
 	m, err := mail.ReadMessage(bytes.NewReader(data))
 	if err != nil {
@@ -63,9 +67,14 @@ func parseMIMEToMessage(data []byte, envelopeFrom string, envelopeRcpts []string
 		replyTo = decoded
 	}
 
-	body, err := extractPlainTextBody(m)
+	bodyText, bodyHTML, err := extractBody(m)
 	if err != nil {
 		return transport.Message{}, err
+	}
+	if bodyText == "" && bodyHTML != "" {
+		// FR75: HTML-only inbound gets a derived text part so the
+		// outbound send is always well-formed multipart.
+		bodyText = template.HTMLToText(bodyHTML)
 	}
 
 	return transport.Message{
@@ -73,68 +82,85 @@ func parseMIMEToMessage(data []byte, envelopeFrom string, envelopeRcpts []string
 		To:       append([]string(nil), envelopeRcpts...), // FR68/NFR22: envelope only
 		ReplyTo:  replyTo,
 		Subject:  subject,
-		BodyText: body,
+		BodyText: bodyText,
+		BodyHTML: bodyHTML,
 	}, nil
 }
 
-// extractPlainTextBody returns the text/plain content of a parsed MIME
-// message. For multipart messages, walks the parts and prefers
-// text/plain over text/html. HTML-only messages are rejected with a
-// clear error (HTML body support is v2 scope).
-func extractPlainTextBody(m *mail.Message) (string, error) {
+// extractBody returns the text/plain and text/html content of a parsed
+// MIME message (FR75). For multipart messages, the first part of each
+// type wins. Single-part text/plain fills only text; single-part
+// text/html fills only html (the caller derives the text part). A
+// message with neither is an error.
+func extractBody(m *mail.Message) (text, html string, err error) {
 	contentType := m.Header.Get("Content-Type")
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		// No Content-Type → assume text/plain US-ASCII per RFC 822.
-		buf, err := io.ReadAll(m.Body)
-		if err != nil {
-			return "", fmt.Errorf("read body: %w", err)
+		buf, rerr := io.ReadAll(m.Body)
+		if rerr != nil {
+			return "", "", fmt.Errorf("read body: %w", rerr)
 		}
-		return string(buf), nil
+		return string(buf), "", nil
 	}
 
 	switch {
 	case mediaType == "" || strings.HasPrefix(mediaType, "text/plain"):
-		buf, err := io.ReadAll(m.Body)
-		if err != nil {
-			return "", fmt.Errorf("read body: %w", err)
+		buf, rerr := io.ReadAll(m.Body)
+		if rerr != nil {
+			return "", "", fmt.Errorf("read body: %w", rerr)
 		}
-		return string(buf), nil
+		return string(buf), "", nil
 	case strings.HasPrefix(mediaType, "text/html"):
-		return "", fmt.Errorf("HTML-only message body not supported in v1.0; send multipart/alternative with a text/plain part")
+		buf, rerr := io.ReadAll(m.Body)
+		if rerr != nil {
+			return "", "", fmt.Errorf("read body: %w", rerr)
+		}
+		return "", string(buf), nil
 	case strings.HasPrefix(mediaType, "multipart/"):
 		boundary := params["boundary"]
 		if boundary == "" {
-			return "", fmt.Errorf("multipart Content-Type missing boundary")
+			return "", "", fmt.Errorf("multipart Content-Type missing boundary")
 		}
-		return readPlainTextFromMultipart(m.Body, boundary)
+		return readPartsFromMultipart(m.Body, boundary)
 	default:
-		return "", fmt.Errorf("unsupported Content-Type: %s", mediaType)
+		return "", "", fmt.Errorf("unsupported Content-Type: %s", mediaType)
 	}
 }
 
-// readPlainTextFromMultipart walks the parts of a multipart body and
-// returns the first text/plain content found. Returns an error if no
-// text/plain part exists.
-func readPlainTextFromMultipart(body io.Reader, boundary string) (string, error) {
+// readPartsFromMultipart walks the parts of a multipart body and
+// captures the first text/plain and the first text/html content. At
+// least one of the two must exist.
+func readPartsFromMultipart(body io.Reader, boundary string) (text, html string, err error) {
 	mr := multipart.NewReader(body, boundary)
 	for {
-		part, err := mr.NextPart()
-		if err == io.EOF {
-			return "", fmt.Errorf("multipart message has no text/plain part")
+		part, perr := mr.NextPart()
+		if perr == io.EOF {
+			if text == "" && html == "" {
+				return "", "", fmt.Errorf("multipart message has no text/plain or text/html part")
+			}
+			return text, html, nil
 		}
-		if err != nil {
-			return "", fmt.Errorf("multipart read: %w", err)
+		if perr != nil {
+			return "", "", fmt.Errorf("multipart read: %w", perr)
 		}
 		ct := part.Header.Get("Content-Type")
 		mediaType, _, _ := mime.ParseMediaType(ct)
-		if mediaType == "" || strings.HasPrefix(mediaType, "text/plain") {
-			buf, err := io.ReadAll(part)
-			_ = part.Close()
-			if err != nil {
-				return "", fmt.Errorf("read text/plain part: %w", err)
+		switch {
+		case (mediaType == "" || strings.HasPrefix(mediaType, "text/plain")) && text == "":
+			buf, rerr := io.ReadAll(part)
+			if rerr != nil {
+				_ = part.Close()
+				return "", "", fmt.Errorf("read text/plain part: %w", rerr)
 			}
-			return string(buf), nil
+			text = string(buf)
+		case strings.HasPrefix(mediaType, "text/html") && html == "":
+			buf, rerr := io.ReadAll(part)
+			if rerr != nil {
+				_ = part.Close()
+				return "", "", fmt.Errorf("read text/html part: %w", rerr)
+			}
+			html = string(buf)
 		}
 		_ = part.Close()
 	}

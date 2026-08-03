@@ -7,6 +7,10 @@ import { Aside } from '@astrojs/starlight/components';
 
 Posthorn uses Go's `text/template` package to render email subjects and bodies. Form fields are exposed to the template as variables, and any field not explicitly named in your config gets appended to a structured "Additional fields" block at the bottom of the body.
 
+<Aside type="tip">
+Want styled mail with clickable buttons? See [HTML email bodies](/features/html-body/) — the same templating with `body_format = "html"`, automatic escaping, and a derived plain-text part. (v2.0+)
+</Aside>
+
 ## Subject
 
 ```toml
@@ -62,6 +66,21 @@ Go's `text/template` is similar to but distinct from Jinja2, Liquid, or Handleba
 | Comment | `{{/* note */}}` | `{{/* this is a comment */}}` |
 
 For the full grammar, see the [Go text/template docs](https://pkg.go.dev/text/template).
+
+### Transforming values
+
+Every template value is a string, and Go's built-in functions cover more than people expect — `printf` is the workhorse:
+
+```text
+Truncate to 3 characters:   {{.serial_number | printf "%.3s"}}
+Right-pad to width 12:      {{.code | printf "%-12s"}}
+Quote a value:              {{.subject_line | printf "%q"}}
+Combine fields:             Ref: {{printf "%s/%s" .category .ticket_id}}
+Fallback when empty:        {{if .company}}{{.company}}{{else}}(not given){{end}}
+Conditional section:        {{if eq .plan "pro"}}Priority support applies.{{end}}
+```
+
+There is **no custom function library**: `lower`, `upper`, `trim`, `uuid`, `now` and friends are not available, deliberately — Posthorn keeps its dependency surface minimal, and value transformation belongs in the app or page that submits the data. If a transform can't be expressed with the built-ins and can't move to the client side, that's worth [an issue](https://github.com/craigmccaskill/posthorn/issues) with the concrete template you're trying to write.
 
 ## Variables available
 

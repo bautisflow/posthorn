@@ -14,14 +14,18 @@ import (
 // header construction through library APIs that escape headers properly,
 // submitter-controlled content cannot smuggle headers into outbound mail.
 //
-// BodyHTML is intentionally absent in v1.0; markdown/HTML body support is
-// deferred to v2.
+// BodyHTML is set only for endpoints configured with body_format = "html"
+// (FR71). When non-empty, BodyText carries the plain-text alternative —
+// transports send both as a multipart pair. BodyText is never empty on an
+// HTML send: the renderer auto-derives it when no explicit text_body
+// template is configured (FR72).
 type Message struct {
 	From     string
 	To       []string
 	ReplyTo  string
 	Subject  string
 	BodyText string
+	BodyHTML string
 }
 
 // SendResult is the per-call metadata returned from a successful Send.

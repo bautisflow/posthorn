@@ -530,18 +530,75 @@ func TestParseMIMEToMessage_MultipartPrefersTextPlain(t *testing.T) {
 	if strings.Contains(msg.BodyText, "<p>") {
 		t.Errorf("BodyText leaked HTML: %q", msg.BodyText)
 	}
+	// FR75: the html part is captured alongside, not dropped.
+	if !strings.Contains(msg.BodyHTML, "<p>html version</p>") {
+		t.Errorf("BodyHTML not captured from multipart: %q", msg.BodyHTML)
+	}
 }
 
-func TestParseMIMEToMessage_HTMLOnly_Rejected(t *testing.T) {
+func TestParseMIMEToMessage_HTMLOnly_AcceptedWithDerivedText(t *testing.T) {
+	// v1.x rejected HTML-only mail with 554; FR75 accepts it and derives
+	// the text part so the outbound send stays well-formed multipart.
 	data := []byte(
 		"From: a@example.com\r\n" +
 			"Subject: HTML\r\n" +
 			"Content-Type: text/html; charset=utf-8\r\n" +
 			"\r\n" +
 			"<p>only html</p>\r\n")
+	msg, err := parseMIMEToMessage(data, "a@example.com", []string{"r@example.com"})
+	if err != nil {
+		t.Fatalf("HTML-only message rejected: %v", err)
+	}
+	if !strings.Contains(msg.BodyHTML, "<p>only html</p>") {
+		t.Errorf("BodyHTML = %q", msg.BodyHTML)
+	}
+	if !strings.Contains(msg.BodyText, "only html") {
+		t.Errorf("BodyText should be derived from the HTML: %q", msg.BodyText)
+	}
+	if strings.Contains(msg.BodyText, "<p>") {
+		t.Errorf("derived BodyText leaked markup: %q", msg.BodyText)
+	}
+}
+
+func TestParseMIMEToMessage_MultipartHTMLOnly_DerivesText(t *testing.T) {
+	boundary := "BOUNDARY"
+	data := []byte(
+		"From: a@example.com\r\n" +
+			"Subject: Multi\r\n" +
+			"Content-Type: multipart/alternative; boundary=\"" + boundary + "\"\r\n" +
+			"\r\n" +
+			"--" + boundary + "\r\n" +
+			"Content-Type: text/html; charset=utf-8\r\n" +
+			"\r\n" +
+			"<h1>Alert</h1><p>Disk is full</p>\r\n" +
+			"--" + boundary + "--\r\n")
+	msg, err := parseMIMEToMessage(data, "a@example.com", []string{"r@example.com"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !strings.Contains(msg.BodyHTML, "<h1>Alert</h1>") {
+		t.Errorf("BodyHTML = %q", msg.BodyHTML)
+	}
+	if !strings.Contains(msg.BodyText, "Alert") || !strings.Contains(msg.BodyText, "Disk is full") {
+		t.Errorf("derived BodyText = %q", msg.BodyText)
+	}
+}
+
+func TestParseMIMEToMessage_MultipartNoTextNoHTML_Rejected(t *testing.T) {
+	boundary := "BOUNDARY"
+	data := []byte(
+		"From: a@example.com\r\n" +
+			"Subject: Multi\r\n" +
+			"Content-Type: multipart/mixed; boundary=\"" + boundary + "\"\r\n" +
+			"\r\n" +
+			"--" + boundary + "\r\n" +
+			"Content-Type: application/octet-stream\r\n" +
+			"\r\n" +
+			"binarybytes\r\n" +
+			"--" + boundary + "--\r\n")
 	_, err := parseMIMEToMessage(data, "a@example.com", []string{"r@example.com"})
 	if err == nil {
-		t.Error("HTML-only message accepted; expected rejection")
+		t.Error("message with no text or html part accepted; expected rejection")
 	}
 }
 

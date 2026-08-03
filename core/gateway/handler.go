@@ -277,7 +277,15 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 		reserved = append(reserved, turnstileField)
 	}
 
-	renderer, err := template.NewRenderer(cfg.Subject, cfg.Body, reserved)
+	// FR71: body_format selects the render mode. HTML endpoints get the
+	// auto-escaping html/template path plus a text fallback (ADR-19).
+	var renderer *template.Renderer
+	var err error
+	if cfg.BodyFormat == config.BodyFormatHTML {
+		renderer, err = template.NewHTMLRenderer(cfg.Subject, cfg.Body, cfg.TextBody, reserved)
+	} else {
+		renderer, err = template.NewRenderer(cfg.Subject, cfg.Body, reserved)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("gateway: %w", err)
 	}
@@ -828,7 +836,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "submission could not be processed", http.StatusInternalServerError)
 		return
 	}
-	body, err := h.renderer.RenderBody(r.Form)
+	var body, bodyHTML string
+	if h.renderer.HTML() {
+		// FR72: HTML endpoints produce both multipart parts.
+		bodyHTML, body, err = h.renderer.RenderBodyHTML(r.Form)
+	} else {
+		body, err = h.renderer.RenderBody(r.Form)
+	}
 	if err != nil {
 		logger.Error("template_render_failed", slog.String("error", err.Error()))
 		http.Error(w, "submission could not be processed", http.StatusInternalServerError)
@@ -876,6 +890,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		To:       toAddresses,
 		Subject:  subject,
 		BodyText: body,
+		BodyHTML: bodyHTML,
 	}
 
 	// Reply-To header (PRD Open Question 4): when the operator names a
@@ -908,6 +923,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				ReplyTo:  msg.ReplyTo,
 				Subject:  msg.Subject,
 				BodyText: msg.BodyText,
+				BodyHTML: msg.BodyHTML,
 			},
 		})
 		return
