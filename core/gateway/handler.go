@@ -70,7 +70,7 @@ type Handler struct {
 	storageGate          *storage.Gate // nil = no [storage]; v1.x behavior
 	limiter              *ratelimit.Limiter // nil if rate_limit not configured
 	authFailLimiter      *ratelimit.Limiter // nil on form-mode endpoints; per-IP brute-force defense for api-mode 401s
-	idemCache            *idempotency.Cache // nil on form-mode endpoints
+	idemCache            idempotency.Cacher // nil on form-mode endpoints; Durable when storage attached (FR81)
 	trustedProxies       []netip.Prefix
 	emailField           string        // resolved at construction (cfg.EmailField or default)
 	maxBodySize          int64         // 0 = no cap
@@ -1018,8 +1018,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // AttachStorage wires the optional storage gate (FR76). Called by
 // cmd/posthorn when a [storage] block is configured; tests attach
 // in-memory gates directly. Nil-safe: without it the handler is v1.x.
+//
+// For api-mode endpoints it also swaps the idempotency backend to the
+// storage-backed Durable (FR81, the ADR-8 seam): same contract, same
+// TTL, restart-survivable. idempotency_cache_size is a capacity for the
+// in-memory backend and is ignored by the durable one.
 func (h *Handler) AttachStorage(gate *storage.Gate) {
 	h.storageGate = gate
+	if h.cfg.Auth == config.AuthAPIKey {
+		h.idemCache = idempotency.NewDurable(gate, h.cfg.Path, idempotency.DefaultTTL)
+	}
 }
 
 // recordSubmission persists the pre-send row (FR77). Returns whether a

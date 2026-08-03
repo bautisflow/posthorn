@@ -101,8 +101,15 @@ func (g *Gate) RunMaintenance(ctx context.Context, probeInterval, pruneInterval,
 				g.logger.Error("storage_prune_failed", slog.String("error", err.Error()))
 				continue
 			}
-			if n > 0 {
-				g.logger.Info("storage_pruned", slog.Int64("rows", n))
+			ni, err := g.store.PruneIdempotency(time.Now())
+			if err != nil {
+				g.logger.Error("storage_prune_failed", slog.String("error", err.Error()))
+				continue
+			}
+			if n+ni > 0 {
+				g.logger.Info("storage_pruned",
+					slog.Int64("submission_rows", n),
+					slog.Int64("idempotency_rows", ni))
 			}
 		}
 	}

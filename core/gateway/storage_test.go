@@ -277,6 +277,64 @@ func TestStorage_DryRun_RecordsNothing(t *testing.T) {
 	assertNoSubmissions(t, gate.Store())
 }
 
+func TestStorage_DurableIdempotency_ReplaysAcrossRestart(t *testing.T) {
+	// FR81 end-to-end: an api-mode response cached under an
+	// Idempotency-Key before a process restart replays byte-identically
+	// after it, with no second send.
+	path := t.TempDir() + "/posthorn.db"
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	st1, err := storage.Open(storage.Config{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr1 := &recordingTransport{sendResult: transport.SendResult{MessageID: "pm-1"}}
+	h1, err := gateway.New(apiModeConfig("valid-key"), tr1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h1.AttachStorage(storage.NewGate(st1, logger))
+
+	req := apiRequest(`{"email":"a@b.com","message":"hi"}`, "valid-key")
+	req.Header.Set("Idempotency-Key", "order-42")
+	rec1 := httptest.NewRecorder()
+	h1.ServeHTTP(rec1, req)
+	if rec1.Code != 200 {
+		t.Fatalf("first request: %d %s", rec1.Code, rec1.Body.String())
+	}
+	if len(tr1.sent) != 1 {
+		t.Fatalf("first request sends = %d", len(tr1.sent))
+	}
+	_ = st1.Close() // "restart"
+
+	st2, err := storage.Open(storage.Config{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st2.Close() })
+	tr2 := &recordingTransport{}
+	h2, err := gateway.New(apiModeConfig("valid-key"), tr2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2.AttachStorage(storage.NewGate(st2, logger))
+
+	req2 := apiRequest(`{"email":"a@b.com","message":"hi"}`, "valid-key")
+	req2.Header.Set("Idempotency-Key", "order-42")
+	rec2 := httptest.NewRecorder()
+	h2.ServeHTTP(rec2, req2)
+
+	if len(tr2.sent) != 0 {
+		t.Fatalf("replay after restart re-sent mail (%d sends)", len(tr2.sent))
+	}
+	if rec2.Code != rec1.Code {
+		t.Errorf("replay status = %d, want %d", rec2.Code, rec1.Code)
+	}
+	if rec2.Body.String() != rec1.Body.String() {
+		t.Errorf("replay not byte-identical (NFR20):\n first: %s\nreplay: %s", rec1.Body.String(), rec2.Body.String())
+	}
+}
+
 // findOnlySubmission asserts exactly one row exists and returns it.
 func findOnlySubmission(t *testing.T, st *storage.Store) storage.Submission {
 	t.Helper()
