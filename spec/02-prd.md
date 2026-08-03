@@ -286,6 +286,80 @@ Block D adds SMTP ingress — the strategic feature that completes the gateway t
 
 **NFR24.** The `/metrics` endpoint **must not** include any submitter-controlled values as label values — labels carry only operator-configured names (endpoint path, transport type, error class). High-cardinality submitter content (recipient addresses, subjects, body fragments) is forbidden as it enables cardinality-explosion attacks against the metrics scraper.
 
+## Functional requirements — block E: v2.0 gateway reliability + seam features (added 2026-08-02)
+
+Block E is the v2.0 release, recut 2026-08-02 against the integration-seam USP (see the brief's status log for what was cut and why). Five feature groups: HTML body, the storage spine, lifecycle callbacks with the minimal suppression slice, the webhook transport, and file attachments. Storage is optional — without a `[storage]` block, v2.0 behaves exactly like v1.x.
+
+### HTML body
+
+**FR71.** Endpoints **must** accept `body_format = "text" | "html"` (default `"text"`; any other value is a config parse error). When `"html"`, the body template renders through Go's `html/template` with contextual auto-escaping — submitter values are inert in every HTML context by construction (see ADR-19). The subject always renders as text.
+
+**FR72.** Every `body_format = "html"` send **must** be multipart: `BodyHTML` plus a plain-text part. The text part comes from the optional `text_body` template (same inline-or-file heuristic as `body`) when set, otherwise it is auto-derived from the rendered HTML by the bespoke converter (tags stripped, entities decoded, block elements become line breaks, anchors become `text (url)`, style/script content dropped). `text_body` on a non-HTML endpoint is a config parse error.
+
+**FR73.** The FR13 custom-fields passthrough block **must** appear in both parts of an HTML send: as an escaped HTML section (rule + list) in the HTML part and as the existing plain block in the text part.
+
+**FR74.** All five transports **must** carry `BodyHTML` structurally: Postmark `HtmlBody`, Resend `html`, Mailgun `html`, SES `Body.Html`, outbound-SMTP `multipart/alternative` with the text part first (RFC 2046 §5.1.4 order of increasing preference). The header-injection test suite (NFR1/NFR2) extends to HTML-mode sends on every transport.
+
+**FR75.** The SMTP listener **must** accept inbound `text/html` parts: `text/html` maps to `BodyHTML`, `text/plain` to `BodyText`, and HTML-only messages (previously rejected `554 5.6.0`) are accepted with the text part auto-derived per FR72. The NFR22 envelope-only invariant is unchanged. Dry-run responses gain `body_html`.
+
+### Storage spine
+
+**FR76.** Posthorn **must** support an optional top-level `[storage]` section (`path`, required; `in_memory = true` for tests; `retention`, default `"30d"`; `max_size`, default `"1GB"`). Absent `[storage]`, all v2.0 storage-dependent behavior is disabled and the pipeline is byte-identical to v1.x.
+
+**FR77.** With storage configured, every accepted submission **must** persist one row (submission UUID, endpoint, transport type, rendered message, raw fields, status, created/sent timestamps, transport message ID, last error). Rows honor `strip_client_ip`. Endpoints with `log_failed_submissions = false` persist metadata only (no payload, no fields) and are not eligible for queueing — the operator's "don't persist submitter content on failure" declaration wins over the queue (ADR-21).
+
+**FR78.** The retry queue is sync-first (ADR-21, revising ADR-5): the request-path send with its FR19-22 inline retries is unchanged. Only when inline retries exhaust on a transient or rate-limited failure does the submission enqueue for background retry with exponential backoff (1m, 4m, 16m, ~1h, ~4h; jittered; 5 attempts) before dead-lettering as status `failed`. Terminal failures still return 502 immediately and never enqueue. Queued api-mode requests receive `202 {"status": "queued", "submission_id": ...}`; queued form-mode requests follow the endpoint's success shape. The response contract becomes: **2xx means terminally handled; the body names the outcome** (`sent`, `queued`, `suppressed`).
+
+**FR79.** Retention pruning **must** run in the background, deleting submission rows older than `storage.retention`. Suppression rows are exempt. `storage.max_size` is enforced via SQLite `max_page_count` so Posthorn's own growth can never fill the disk; at the cap, new persistence stops (degrade per FR80) and pruning continues to function.
+
+**FR80.** Storage failure **must never block mail flow** (NFR27). A periodic canary write probes the full write path; on failure Posthorn degrades to v1.x synchronous behavior (no logging rows, no queueing, no 202s offered), emits `storage_degraded` (and later `storage_recovered`) log events, flips the `posthorn_storage_healthy` gauge, and reports the state in `/healthz`.
+
+**FR81.** With storage configured, the idempotency cache **must** swap to the SQLite backend behind the unchanged `core/idempotency` interface: durable across restarts, same 24h TTL, background expiry cleanup, NFR20 byte-identical replays (a request that received 202 queued replays as that 202 even after the queued send completes). Without storage, the v1.x in-memory cache remains.
+
+### Lifecycle callbacks + suppression (minimal slice)
+
+**FR82.** A top-level `[lifecycle]` section **must** enable an inbound Postmark event endpoint (`/events/postmark`) on the main listener. `[lifecycle]` requires `[storage]` (parse error otherwise) and **must** carry `basic_auth_username`/`basic_auth_password` — unauthenticated or wrongly-authenticated posts are rejected 401 (fail-closed; constant-time comparison). The endpoint is rate-limited. Postmark-only in v2.0 (ADR-22).
+
+**FR83.** Inbound events **must** normalize to a stable shape: `event` (enum: `delivered`, `hard_bounce`, `soft_bounce`, `spam_complaint`, `opened`, `clicked`, `other`), `submission_id`, `endpoint`, `recipient`, `timestamp`, `provider`, plus the raw provider payload nested as best-effort `provider_data`. Correlation is by transport message ID against the submission log; events with no match are answered 200, logged, counted in metrics, and not forwarded.
+
+**FR84.** Endpoints **may** set `webhook_url` + `webhook_secret`. Matched events **must** POST the normalized shape to the originating endpoint's `webhook_url`, signed `X-Posthorn-Signature: sha256=<HMAC-SHA256(body, webhook_secret)>`. Delivery uses the FR19-22 error classes; transient failures ride the retry queue. `webhook_secret` falls under NFR3 (never logged; sentinel tests).
+
+**FR85.** `hard_bounce` and `spam_complaint` events **must** auto-insert a global suppression row (`email`, `reason`, `source_endpoint`, `timestamp`). Suppression is reason-scoped by design (ADR-23): bounce/complaint suppressions apply to all endpoints; per-endpoint scoping is reserved for future unsubscribe-class reasons.
+
+**FR86.** With storage configured, sends **must** check suppression per recipient: suppressed recipients are removed before send; if all recipients are suppressed the response is `200 {"status": "suppressed", ...}` with per-recipient reasons; mixed lists send to the remainder and report per-recipient outcomes. Callers **must not** be given a retryable status for a suppressed address.
+
+**FR87.** A `posthorn suppressions` CLI (`list`, `add <email> --reason`, `remove <email>`) **must** operate directly on the storage file. This is the management and GDPR-erasure surface; there is no HTTP admin API in v2.0 (ADR-23).
+
+### Webhook transport
+
+**FR88.** A `type = "webhook"` transport **must** POST submissions as JSON to a configured `url`: envelope (from/to/reply-to/subject), rendered bodies, raw `fields`, endpoint path, submission ID, timestamp. The body is signed `X-Posthorn-Signature: sha256=<HMAC-SHA256>` with the configured `secret` (NFR3 applies). Optional operator-defined static headers are allowed. Status mapping follows FR19-22 (2xx success, 429 rate-limited, 5xx transient, other 4xx terminal).
+
+**FR89.** `transport.Message` gains optional `Fields` (raw submitted key/values) per ADR-24's amendment of ADR-12: populated by HTTP ingresses, nil from the SMTP listener, ignored by all mail transports, and **never** interpolated into any header at any layer (NFR1 restated for it explicitly).
+
+### File attachments
+
+**FR90.** Attachments are opt-in via `[endpoints.attachments]` (NFR25). Without the block, form-mode file parts are dropped exactly as v1.x and api-mode requests carrying `attachments` are rejected 422. With it: form-mode multipart file parts and api-mode `attachments: [{filename, content_type, data(base64)}]` are accepted. The SMTP listener does not ingest attachments in v2.0 (demand-gated; see brief).
+
+**FR91.** `[endpoints.attachments]` **must** declare `allowed_types` explicitly (no default; missing list is a config parse error — fail-closed, ADR-25). Enforcement runs against the sniffed content type of the actual bytes, never the client-declared type. Wildcards (`image/*`) are supported. `max_count` (default 5) and `max_total_size` (default 10MB) bound volume; violations return 422 with per-file reasons. `max_body_size` must accommodate the attachment budget; validation warns when it can't.
+
+**FR92.** Transports **must** map attachments structurally via each provider's native mechanism (Postmark/Resend/Mailgun/SES attachment fields; outbound-SMTP builds `multipart/mixed` around the existing body structure). The header-injection suite extends to attachment filenames and content types.
+
+## Non-functional requirements — block E (added 2026-08-02)
+
+**NFR25.** Security-relevant features and new surfaces are **opt-in, never default-on**. No defense, listener, storage layer, or ingestion capability activates without explicit configuration naming it. (Generalizes ADR-10's philosophy; applies to `[storage]`, `[lifecycle]`, `[endpoints.attachments]`, `webhook_url`, and everything after them.)
+
+**NFR26.** Storage-backed features assume **one Posthorn instance, one writer**. The SQLite file must not be shared between concurrent instances; this is documented, and the single-replica assumption is stated wherever multi-replica deployment is discussed.
+
+**NFR27.** Storage failure (disk full, corruption, lock loss) **must never** block or delay synchronous mail delivery. Degradation to v1.x behavior is automatic, loud (log + metric + healthz), and recoverable without restart.
+
+**NFR28.** Queued delivery is **at-least-once**: a crash between provider acceptance and success recording may replay a send on recovery. This duplicate window is documented, and submission IDs are stable across attempts so receivers can deduplicate.
+
+**NFR29.** Lifecycle and webhook secrets (`webhook_secret`, `basic_auth_password`, webhook transport `secret`) fall under NFR3: never logged, sentinel-tested. Inbound basic-auth comparison is constant-time (NFR19 pattern).
+
+**NFR30.** NFR24 extends to block E: no attachment-derived values (filenames, sniffed or declared types) and no event-derived values (recipients, provider message IDs) may appear as metric label values. Counts and operator-named enums only.
+
+**NFR31.** The public docs **must** carry a data-at-rest page before v2.0 ships: what the SQLite file contains (submitter PII, rendered payloads, attachment blobs, suppression emails held indefinitely), retention behavior, sizing guidance, file permissions/backup guidance, the theft-target framing, and the CLI erasure path.
+
 ## Testing strategy
 
 The brief commits to test coverage for header injection (NFR2) and to a 30-day production trial. Beyond those, the v1 testing strategy is:
@@ -510,6 +584,63 @@ Original definition of done was a Caddy v2 adapter module wrapping the core hand
 - **Story 12.4:** Tag v1.0.0 + GHCR release.
   - Acceptance: GitHub release published with release notes summarizing the full v1.0 scope. Docker images pullable on amd64 and arm64.
 
+### Epic 13: HTML body (block E) [M, Exec]
+
+**Definition of done:** `body_format = "html"` endpoints send multipart mail through all five transports with auto-escaped submitter values and a text part always present; the SMTP listener accepts HTML-only inbound; docs page live.
+
+- **Story 13.1:** Config schema (`body_format`, `text_body`) + parse-time validation; `html/template` renderer path with FR13 HTML block. (FR71, FR73)
+- **Story 13.2:** Bespoke HTML-to-text converter + tests (tags, entities, blocks, anchors, style/script stripping). (FR72)
+- **Story 13.3:** `Message.BodyHTML` through all five transports incl. SMTP-out `multipart/alternative`; header-injection suite extension; dry-run `body_html`. (FR74)
+- **Story 13.4:** SMTP listener HTML mapping; HTML-only accept path replacing the 554. (FR75)
+- **Story 13.5:** posthorn.dev page: branded-template example, escaping model, reply on #5. 
+
+### Epic 14: Storage spine (block E) [XL, Exec + Decision]
+
+**Definition of done:** `[storage]` endows the gateway with a submission log, sync-first retry queue, durable idempotency, retention, size cap, and canary-probed degradation; without it, v1.x behavior byte-identical (proven by running the existing suite against a storage-less config).
+
+- **Story 14.1:** `core/storage` package: modernc.org/sqlite (ADR-20), schema, migrations pragma, `in_memory` test mode. (FR76)
+- **Story 14.2:** Submission log wiring in both ingresses; `strip_client_ip` + `log_failed_submissions = false` semantics. (FR77)
+- **Story 14.3:** Retry queue + background worker: enqueue on transient exhaustion, backoff schedule, dead-letter `failed`, 202 contract. (FR78)
+- **Story 14.4:** Retention pruning, `max_size` via `max_page_count`, canary probe, healthz/metrics/log surfacing, degrade-to-sync. (FR79, FR80)
+- **Story 14.5:** Durable idempotency backend behind the unchanged interface. (FR81)
+- **Story 14.6:** Crash-recovery test suite: kill mid-send, restart, replay, duplicate-window documentation test, byte-identical replays.
+
+### Epic 15: Lifecycle callbacks + suppression slice (block E) [L, Exec + External]
+
+**Definition of done:** Postmark events land authenticated, normalize, forward signed to per-endpoint webhooks, and hard bounces/complaints auto-suppress; suppressed sends answer terminally; CLI manages the list. External: validation against live Postmark webhooks.
+
+- **Story 15.1:** `[lifecycle]` config + `/events/postmark` endpoint: basic auth fail-closed, rate limit, storage requirement. (FR82)
+- **Story 15.2:** Event normalization + message-ID correlation + unknown-event handling. (FR83)
+- **Story 15.3:** Signed forwarding to `webhook_url` with retry classes + queue reuse; NFR29 sentinel tests. (FR84)
+- **Story 15.4:** Suppression rows, send-time check, `suppressed` response contract, mixed-recipient semantics. (FR85, FR86)
+- **Story 15.5:** `posthorn suppressions` CLI. (FR87)
+- **Story 15.6:** Docs: lifecycle setup, reachability caveat, capability matrix note (Postmark-only).
+
+### Epic 16: Webhook transport (block E) [M, Exec]
+
+**Definition of done:** `type = "webhook"` delivers signed structured submissions with standard retry classification; `Fields` crosses the boundary per the amended ADR-12 and mail transports provably ignore it.
+
+- **Story 16.1:** `Message.Fields` + ingress population + guardrail tests (mail transports ignore; never in headers; SMTP nil). (FR89)
+- **Story 16.2:** `core/transport/webhook.go`: payload, HMAC signing, status mapping, registry entry, NFR3 sentinel tests. (FR88)
+- **Story 16.3:** Provider-test battery integration + docs page with a receiver verification example.
+
+### Epic 17: File attachments (block E) [L, Exec]
+
+**Definition of done:** Opt-in endpoints accept files at both HTTP doors within sniffed-type/count/size bounds and every transport delivers them; non-opted endpoints behave exactly as v1.x.
+
+- **Story 17.1:** `[endpoints.attachments]` config: fail-closed `allowed_types`, limits, form-mode multipart ingestion, sniffing. (FR90, FR91)
+- **Story 17.2:** api-mode base64 shape + 422 semantics. (FR90)
+- **Story 17.3:** Transport mapping for all five (SES: verify SESv2 Simple attachment support at implementation time; if absent, raw-MIME construction is the fallback and the story grows — flag before building). SMTP-out `multipart/mixed`. Header-injection suite over filenames/types. (FR92)
+- **Story 17.4:** Docs: attachments page, storage-sizing interplay with queued blobs.
+
+### Epic 18: v2.0 release [M, Exec + Decision + External]
+
+**Definition of done:** Docs complete (incl. NFR31 data-at-rest page and per-provider capability matrix), CHANGELOG 2.0.0, roadmap page updated, tag pushed, images published.
+
+- **Story 18.1:** Data-at-rest operator page (NFR31); deployment-shape note for lifecycle.
+- **Story 18.2:** Capability matrix, CHANGELOG, README refresh, roadmap page.
+- **Story 18.3:** Live validation pass (Postmark events end-to-end; provider battery re-run), tag `v2.0.0`.
+
 ## Out of scope (re-stated for clarity)
 
 Defer to [the project brief](./01-project-brief.md) §"MVP Scope > Out of scope" for the full list. After the 2026-05-16 rescope folded v1.1 / v1.2 / v1.3 into v1.0, the deferred line is now between v1.0 (everything currently spec'd) and v2 (the stateful-platform boundary). Key v1.0 exclusions:
@@ -519,9 +650,9 @@ Defer to [the project brief](./01-project-brief.md) §"MVP Scope > Out of scope"
 - **Webhook transport (outbound + lifecycle event forwarding)** — v2.
 - **Suppression list, automatic unsubscribe injection (RFC 8058)** — v2.
 - **Durable idempotency** — v2 (replaces v1.0's in-memory cache).
-- **Multi-tenant / per-tenant config isolation, multiple outputs per endpoint (fan-out), per-RCPT routing on SMTP listener** — v2.
-- **Batch send API** — deferred without a target version; see brief's "Deliberately not on the roadmap" section.
-- **HTML body support** — v2.
+- **Multi-tenant / per-tenant config isolation, per-RCPT routing on SMTP listener** — design discussion (#30), no target version.
+- **Batch send API, automatic unsubscribe injection, fan-out, SMTP-listener attachment passthrough** — demand-gated without a target version; see brief's "Deliberately not on the roadmap" section (unsubscribe and fan-out moved there in the 2026-08-02 recut).
+- **HTML body support** — was listed here as v2; now in scope as block E (FR71–FR75).
 - **Admin UI, proof-of-work spam challenge, PGP encryption** — v3.
 - **Inbound mail parsing (MX target, IMAP polling)** — deliberately deferred to v3+; different threat model entirely.
 
@@ -561,3 +692,4 @@ Every FR and NFR maps back to a brief commitment. Quick reference:
 | Post-MVP > v1.0 block C (multi-transport) | FR47–FR53, Epic 9 |
 | Post-MVP > v1.0 block C (operational features) | FR54–FR59, NFR24, Epic 10 |
 | Post-MVP > v1.0 block D (SMTP ingress) | FR60–FR68, NFR22, NFR23, Epic 11 |
+| Post-MVP > v2.0 (recut 2026-08-02) | FR71–FR92, NFR25–NFR31, Epics 13–18, ADRs 19–25 |
