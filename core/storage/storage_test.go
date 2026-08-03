@@ -74,6 +74,37 @@ func TestRecordAndGet_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestSubmission_AttachmentsRoundTrip(t *testing.T) {
+	// FR92: queued sends replay with their files intact.
+	s := memStore(t)
+	sub := sampleSubmission("sub-att", StatusSending)
+	sub.Attachments = []Attachment{
+		{Filename: "a.pdf", ContentType: "application/pdf", Data: []byte("%PDF binary \x00 bytes")},
+	}
+	if err := s.RecordSubmission(sub); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.GetSubmission("sub-att")
+	if err != nil || !ok {
+		t.Fatalf("get: ok=%v err=%v", ok, err)
+	}
+	if len(got.Attachments) != 1 {
+		t.Fatalf("attachments = %d", len(got.Attachments))
+	}
+	a := got.Attachments[0]
+	if a.Filename != "a.pdf" || a.ContentType != "application/pdf" || string(a.Data) != "%PDF binary \x00 bytes" {
+		t.Errorf("attachment = %+v", a)
+	}
+	// No attachments stays nil after round-trip.
+	if err := s.RecordSubmission(sampleSubmission("sub-plain", StatusSent)); err != nil {
+		t.Fatal(err)
+	}
+	plain, _, _ := s.GetSubmission("sub-plain")
+	if plain.Attachments != nil {
+		t.Errorf("plain row attachments = %+v", plain.Attachments)
+	}
+}
+
 func TestMarkSent_SetsStatusAndTimestamp(t *testing.T) {
 	s := memStore(t)
 	if err := s.RecordSubmission(sampleSubmission("sub-1", StatusSending)); err != nil {

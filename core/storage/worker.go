@@ -126,6 +126,11 @@ func (w *Worker) attempt(ctx context.Context, entry DueRetry, hooks Hooks) {
 		SubmissionID: entry.ID,
 		Fields:       entry.Fields,
 	}
+	for _, a := range entry.Attachments {
+		msg.Attachments = append(msg.Attachments, transport.Attachment{
+			Filename: a.Filename, ContentType: a.ContentType, Data: a.Data,
+		})
+	}
 
 	res, err := w.Send(ctx, entry.Endpoint, msg)
 	if err == nil {

@@ -89,6 +89,7 @@ export default defineConfig({
             { label: 'Templating', slug: 'features/templating' },
             { label: 'HTML email bodies', slug: 'features/html-body' },
             { label: 'Storage & reliability', slug: 'features/storage' },
+            { label: 'File attachments', slug: 'features/attachments' },
             { label: 'Lifecycle events & suppression', slug: 'features/lifecycle' },
             { label: 'Retry policy', slug: 'features/retry-policy' },
             { label: 'Structured logging', slug: 'features/logging' },

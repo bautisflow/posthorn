@@ -36,6 +36,21 @@ type Message struct {
 	// ever be interpolated into any header at any layer (NFR1).
 	SubmissionID string
 	Fields       map[string][]string
+
+	// Attachments carries files accepted by an opt-in
+	// [endpoints.attachments] endpoint (FR90-FR92, ADR-25). ContentType
+	// is the SNIFFED type of Data — enforcement and outbound declaration
+	// both use it; the client-declared type never crosses this boundary.
+	// Filenames are structured API/MIME parameter values only, never
+	// header-line material (NFR1).
+	Attachments []Attachment
+}
+
+// Attachment is one file crossing to a transport.
+type Attachment struct {
+	Filename    string
+	ContentType string
+	Data        []byte
 }
 
 // SendResult is the per-call metadata returned from a successful Send.

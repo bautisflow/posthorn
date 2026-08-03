@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"time"
 )
 
@@ -123,6 +125,25 @@ func (m *MailgunTransport) Send(ctx context.Context, msg Message) (SendResult, e
 	if msg.BodyHTML != "" {
 		if err := mw.WriteField("html", msg.BodyHTML); err != nil {
 			return SendResult{}, &TransportError{Class: ErrTerminal, Cause: err, Message: "encode mailgun html"}
+		}
+	}
+	// Attachments ride as repeated `attachment` file parts (FR92). The
+	// part header is built via mime.FormatMediaType — parameter values
+	// (the submitter-influenced filename) are quoted/encoded
+	// structurally, never concatenated raw (NFR1).
+	for _, a := range msg.Attachments {
+		hdr := textproto.MIMEHeader{}
+		hdr.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+			"name":     "attachment",
+			"filename": a.Filename,
+		}))
+		hdr.Set("Content-Type", a.ContentType)
+		part, err := mw.CreatePart(hdr)
+		if err != nil {
+			return SendResult{}, &TransportError{Class: ErrTerminal, Cause: err, Message: "encode mailgun attachment"}
+		}
+		if _, err := part.Write(a.Data); err != nil {
+			return SendResult{}, &TransportError{Class: ErrTerminal, Cause: err, Message: "encode mailgun attachment"}
 		}
 	}
 	if err := mw.Close(); err != nil {

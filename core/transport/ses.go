@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -87,8 +88,18 @@ type sesContent struct {
 }
 
 type sesSimple struct {
-	Subject sesContentField `json:"Subject"`
-	Body    sesBody         `json:"Body"`
+	Subject     sesContentField `json:"Subject"`
+	Body        sesBody         `json:"Body"`
+	Attachments []sesAttachment `json:"Attachments,omitempty"`
+}
+
+// sesAttachment is the SESv2 Simple-content attachment shape (added by
+// AWS to SendEmail in 2025; verified against the SESv2 API reference
+// during Story 17.3).
+type sesAttachment struct {
+	RawContent  string `json:"RawContent"` // base64
+	FileName    string `json:"FileName"`
+	ContentType string `json:"ContentType,omitempty"`
 }
 
 type sesContentField struct {
@@ -137,6 +148,13 @@ func (s *SESTransport) Send(ctx context.Context, msg Message) (SendResult, error
 	}
 	if msg.BodyHTML != "" {
 		payload.Content.Simple.Body.Html = &sesContentField{Data: msg.BodyHTML}
+	}
+	for _, a := range msg.Attachments {
+		payload.Content.Simple.Attachments = append(payload.Content.Simple.Attachments, sesAttachment{
+			RawContent:  base64.StdEncoding.EncodeToString(a.Data),
+			FileName:    a.Filename,
+			ContentType: a.ContentType,
+		})
 	}
 	if msg.ReplyTo != "" {
 		payload.ReplyToAddresses = []string{msg.ReplyTo}

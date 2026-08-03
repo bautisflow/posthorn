@@ -1,0 +1,60 @@
+---
+title: File attachments
+description: Opt-in file uploads on form and API endpoints, judged by their bytes, delivered through every transport.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note">Available from **v2.0**. Attachments are **opt-in per endpoint** — without the block below, file uploads are dropped (form mode) or rejected (API mode), exactly as before.</Aside>
+
+```toml
+[[endpoints]]
+path = "/job-application"
+# ... endpoint config ...
+
+[endpoints.attachments]
+allowed_types  = ["application/pdf", "image/*"]   # required, no default
+max_count      = 5        # default
+max_total_size = "10MB"   # default
+```
+
+## Judged by bytes, not by name
+
+`allowed_types` has **no default** — enabling attachments means naming what you accept. Enforcement runs against the *sniffed* content type of the actual file bytes; the client-declared type and the filename extension are ignored for authorization. A shell script named `photo.png` is rejected as the `text/plain` it actually is.
+
+Two consequences worth knowing:
+
+- Wildcards match sniffed families: `image/*` covers PNG, JPEG, GIF, WebP.
+- Only sniffable types are usable. Text-family formats (CSV, plain `.txt`) all sniff as `text/plain` — allow `text/plain` to accept them, knowing you can't distinguish among them. Unrecognizable binaries sniff as `application/octet-stream`.
+
+Violations return `422` with per-file reasons; nothing sends.
+
+## Form mode
+
+Add `<input type="file" name="cv">` to your form (any field name; `enctype="multipart/form-data"` required). Files within policy ride along to the transport; the outbound attachment's content type is the sniffed value, and filenames are sanitized (path components and control characters stripped).
+
+## API mode
+
+Attachments are a structural `attachments` array — base64 data, never a template field:
+
+```json
+{
+  "email": "customer@example.com",
+  "message": "Your license is attached.",
+  "attachments": [
+    {"filename": "license.pdf", "data": "<base64>"}
+  ]
+}
+```
+
+`content_type` is accepted but ignored — the sniffed type wins. Sending `attachments` to an endpoint without the opt-in block returns `422` rather than silently dropping your files.
+
+## Sizing interplay
+
+`max_body_size` must accommodate the attachment budget. On attachment endpoints, an unset `max_body_size` defaults to `max_total_size` + 1MB of form headroom; an explicit value smaller than `max_total_size` is a config error. With [storage](/features/storage/) enabled, queued sends persist attachments as blobs — factor them into `storage.max_size`.
+
+## Delivery
+
+All five mail transports carry attachments natively (Postmark/Resend/SES JSON fields, Mailgun multipart, outbound-SMTP `multipart/mixed`), and the [webhook transport's](/configuration/transports/webhook/) receivers are unaffected (attachments do not cross into webhook payloads in v2.0). The SMTP *listener* does not ingest attachments from relayed mail — [open an issue](https://github.com/craigmccaskill/posthorn/issues) if you have an app that needs that.
+
+Mind your provider's own limits (Postmark 10MB total, Mailgun 25MB, SES 40MB raw): Posthorn enforces your configured budget, and the provider enforces theirs at send time.
