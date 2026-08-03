@@ -67,6 +67,21 @@ Go's `text/template` is similar to but distinct from Jinja2, Liquid, or Handleba
 
 For the full grammar, see the [Go text/template docs](https://pkg.go.dev/text/template).
 
+### Transforming values
+
+Every template value is a string, and Go's built-in functions cover more than people expect — `printf` is the workhorse:
+
+```text
+Truncate to 3 characters:   {{.serial_number | printf "%.3s"}}
+Right-pad to width 12:      {{.code | printf "%-12s"}}
+Quote a value:              {{.subject_line | printf "%q"}}
+Combine fields:             Ref: {{printf "%s/%s" .category .ticket_id}}
+Fallback when empty:        {{if .company}}{{.company}}{{else}}(not given){{end}}
+Conditional section:        {{if eq .plan "pro"}}Priority support applies.{{end}}
+```
+
+There is **no custom function library**: `lower`, `upper`, `trim`, `uuid`, `now` and friends are not available, deliberately — Posthorn keeps its dependency surface minimal, and value transformation belongs in the app or page that submits the data. If a transform can't be expressed with the built-ins and can't move to the client side, that's worth [an issue](https://github.com/craigmccaskill/posthorn/issues) with the concrete template you're trying to write.
+
 ## Variables available
 
 Every submitted field is available as `{{.fieldname}}`. Missing fields render as the empty string. Posthorn does not currently inject metadata variables (request ID, timestamp, endpoint path) into templates — those values are present in the structured log line keyed by `submission_id`, not in the email body.
