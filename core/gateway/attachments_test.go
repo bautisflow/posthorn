@@ -175,18 +175,29 @@ func TestFormAttachments_CountAndSizeLimits(t *testing.T) {
 }
 
 func TestFormAttachments_FilenameSanitized(t *testing.T) {
+	// Path-traversal names must lose their path components at ingestion.
+	// (CRLF-in-filename is deliberately not exercised through the HTTP
+	// multipart layer — mime/multipart's handling of malformed part
+	// headers varies across Go versions; the CRLF defense is covered at
+	// the transport layer, where Messages are constructed directly.)
 	tr := &recordingTransport{}
 	h := attachmentEndpoint(t, tr, &config.AttachmentsConfig{AllowedTypes: []string{"image/*"}})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, multipartUpload(t, map[string]string{"message": "hi"},
-		map[string][]byte{"../../etc/passwd\r\nBcc: evil": pngBytes}))
+		map[string][]byte{"../../etc/passwd.png": pngBytes}))
 	if rec.Code != 200 {
 		t.Fatalf("status = %d", rec.Code)
+	}
+	if len(tr.sent) != 1 || len(tr.sent[0].Attachments) != 1 {
+		t.Fatalf("sends=%d attachments=%v", len(tr.sent), tr.sent)
 	}
 	name := tr.sent[0].Attachments[0].Filename
 	if strings.ContainsAny(name, "/\\\r\n") {
 		t.Errorf("filename not sanitized: %q", name)
+	}
+	if name != "passwd.png" {
+		t.Errorf("filename = %q, want path stripped", name)
 	}
 }
 
