@@ -109,8 +109,8 @@ func TestHTMLRenderer_ExtrasBlockInBothParts(t *testing.T) {
 	}
 	form := map[string][]string{
 		"message": {"hi"},
-		"email":   {"a@b.com"},           // reserved — excluded
-		"company": {"<b>Evil&Co</b>"},    // unnamed — appears, escaped in HTML
+		"email":   {"a@b.com"},        // reserved — excluded
+		"company": {"<b>Evil&Co</b>"}, // unnamed — appears, escaped in HTML
 	}
 	html, text, err := r.RenderBodyHTML(form)
 	if err != nil {
