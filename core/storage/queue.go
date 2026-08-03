@@ -142,6 +142,22 @@ func (s *Store) RecordRetryFailure(id, lastError string, now time.Time) (deadLet
 	return deadLettered, err
 }
 
+// DeadLetter removes a submission from the queue and marks it failed
+// immediately, regardless of remaining attempts. Used when a background
+// retry hits a *terminal* transport error — the provider has said this
+// send will never succeed, so laddering further is noise (FR78).
+func (s *Store) DeadLetter(id, lastError string) error {
+	return s.inTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`DELETE FROM retry_queue WHERE submission_id = ?`, id); err != nil {
+			return err
+		}
+		_, err := tx.Exec(
+			`UPDATE submissions SET status = ?, last_error = ? WHERE id = ?`,
+			StatusFailed, lastError, id)
+		return err
+	})
+}
+
 // QueueDepth reports how many submissions are waiting or in flight —
 // the posthorn_retry_queue_depth gauge.
 func (s *Store) QueueDepth() (int, error) {
