@@ -158,6 +158,73 @@ func (c *Counter) Emit(w io.Writer) error {
 	return nil
 }
 
+// --- Gauge -------------------------------------------------------------
+
+// Gauge is a set-to-current-value metric (may go up or down), added in
+// v2.0 for the storage surface (FR80): posthorn_storage_healthy and
+// posthorn_retry_queue_depth. Same label-series model as Counter.
+type Gauge struct {
+	name       string
+	help       string
+	labelNames []string
+
+	mu     sync.Mutex
+	values map[string]float64
+}
+
+// NewGauge constructs a gauge. Same contract as NewCounter.
+func NewGauge(name, help string, labelNames []string) *Gauge {
+	return &Gauge{
+		name:       name,
+		help:       help,
+		labelNames: append([]string(nil), labelNames...),
+		values:     make(map[string]float64),
+	}
+}
+
+// Name returns the gauge's name (collector contract).
+func (g *Gauge) Name() string { return g.name }
+
+// Set sets the gauge for the given label values.
+func (g *Gauge) Set(v float64, labelValues ...string) {
+	if len(labelValues) != len(g.labelNames) {
+		panic(fmt.Sprintf("metrics.Gauge %s: got %d label values, want %d", g.name, len(labelValues), len(g.labelNames)))
+	}
+	key := encodeLabelValues(labelValues)
+	g.mu.Lock()
+	g.values[key] = v
+	g.mu.Unlock()
+}
+
+// Emit emits the gauge's exposition lines (collector contract).
+func (g *Gauge) Emit(w io.Writer) error {
+	g.mu.Lock()
+	keys := make([]string, 0, len(g.values))
+	for k := range g.values {
+		keys = append(keys, k)
+	}
+	snapshot := make(map[string]float64, len(g.values))
+	for _, k := range keys {
+		snapshot[k] = g.values[k]
+	}
+	g.mu.Unlock()
+
+	sort.Strings(keys)
+	if _, err := fmt.Fprintf(w, "# HELP %s %s\n", g.name, escapeHelp(g.help)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "# TYPE %s gauge\n", g.name); err != nil {
+		return err
+	}
+	for _, k := range keys {
+		labelStr := renderLabels(g.labelNames, k)
+		if _, err := fmt.Fprintf(w, "%s%s %g\n", g.name, labelStr, snapshot[k]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // --- Histogram ---------------------------------------------------------
 
 // Histogram observes numeric values into a fixed set of buckets. Each

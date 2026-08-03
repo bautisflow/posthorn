@@ -15,6 +15,7 @@ import (
 	"github.com/craigmccaskill/posthorn/log"
 	"github.com/craigmccaskill/posthorn/metrics"
 	"github.com/craigmccaskill/posthorn/ratelimit"
+	"github.com/craigmccaskill/posthorn/storage"
 	"github.com/craigmccaskill/posthorn/transport"
 )
 
@@ -36,6 +37,7 @@ type Listener struct {
 	tlsConfig *tls.Config // nil when RequireTLS is false and no client-cert
 	logger    *slog.Logger
 	recorder  *metrics.Recorder
+	gate      *storage.Gate // nil = no [storage]; v1.x behavior (FR77)
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -57,6 +59,13 @@ type Listener struct {
 // can't be loaded. maxBodySize is the parsed byte count from
 // ListenerConfig.MaxMessageSize (caller parses; this package treats
 // it opaquely).
+// AttachStorage wires the optional storage gate (FR76/FR77). Called by
+// cmd/posthorn when a [storage] block is configured. Nil-safe: without
+// it the listener is v1.x.
+func (l *Listener) AttachStorage(gate *storage.Gate) {
+	l.gate = gate
+}
+
 func New(cfg ListenerConfig, tp transport.Transport, maxBodySize int64, logger *slog.Logger, recorder *metrics.Recorder) (*Listener, error) {
 	if logger == nil {
 		logger = log.Discard()

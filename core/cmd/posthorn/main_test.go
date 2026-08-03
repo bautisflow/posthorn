@@ -163,7 +163,7 @@ func TestRunValidate_TemplateParseError(t *testing.T) {
 func muxRegRec(cfg *config.Config) (*http.ServeMux, *metrics.Registry, *metrics.Recorder, error) {
 	reg := metrics.New()
 	rec := metrics.NewRecorder(reg)
-	mux, err := buildMux(cfg, buildLogger(config.LoggingConfig{}), reg, rec)
+	mux, _, err := buildMux(cfg, buildLogger(config.LoggingConfig{}), reg, rec, nil)
 	return mux, reg, rec, err
 }
 

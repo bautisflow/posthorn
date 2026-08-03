@@ -28,6 +28,14 @@ type Recorder struct {
 	validationFailed *Counter
 	idempotentReplay *Counter
 	sendLatency      *Histogram
+
+	// v2.0 storage surface (FR78, FR80).
+	queued          *Counter
+	queueSent       *Counter
+	queueRetried    *Counter
+	queueDeadLetter *Counter
+	storageHealthy  *Gauge
+	retryQueueDepth *Gauge
 }
 
 // NewRecorder constructs a Recorder backed by counters and histograms
@@ -85,6 +93,36 @@ func NewRecorder(reg *Registry) *Recorder {
 			LatencyBuckets,
 			[]string{"endpoint", "transport"},
 		),
+		queued: NewCounter(
+			"posthorn_submissions_queued_total",
+			"Submissions whose inline retries exhausted transiently and entered the background retry queue (202 to api-mode callers).",
+			[]string{"endpoint", "transport"},
+		),
+		queueSent: NewCounter(
+			"posthorn_queue_sent_total",
+			"Queued submissions delivered by a background retry.",
+			[]string{"endpoint"},
+		),
+		queueRetried: NewCounter(
+			"posthorn_queue_retries_total",
+			"Background retry attempts that failed transiently and rescheduled.",
+			[]string{"endpoint"},
+		),
+		queueDeadLetter: NewCounter(
+			"posthorn_queue_dead_lettered_total",
+			"Queued submissions abandoned as failed (terminal error or attempts exhausted).",
+			[]string{"endpoint"},
+		),
+		storageHealthy: NewGauge(
+			"posthorn_storage_healthy",
+			"1 when the storage canary write succeeds, 0 while degraded (mail still flows synchronously; nothing persists).",
+			nil,
+		),
+		retryQueueDepth: NewGauge(
+			"posthorn_retry_queue_depth",
+			"Submissions currently waiting in (or claimed from) the retry queue.",
+			nil,
+		),
 	}
 	reg.Register(r.submitted)
 	reg.Register(r.sent)
@@ -96,6 +134,12 @@ func NewRecorder(reg *Registry) *Recorder {
 	reg.Register(r.validationFailed)
 	reg.Register(r.idempotentReplay)
 	reg.Register(r.sendLatency)
+	reg.Register(r.queued)
+	reg.Register(r.queueSent)
+	reg.Register(r.queueRetried)
+	reg.Register(r.queueDeadLetter)
+	reg.Register(r.storageHealthy)
+	reg.Register(r.retryQueueDepth)
 	return r
 }
 
@@ -180,4 +224,58 @@ func (r *Recorder) IdempotentReplay(endpoint string) {
 		return
 	}
 	r.idempotentReplay.Inc(endpoint)
+}
+
+// Queued records a submission entering the background retry queue after
+// exhausting inline retries (FR78).
+func (r *Recorder) Queued(endpoint, transport string) {
+	if r == nil {
+		return
+	}
+	r.queued.Inc(endpoint, transport)
+}
+
+// QueueSent records a background retry that delivered.
+func (r *Recorder) QueueSent(endpoint string) {
+	if r == nil {
+		return
+	}
+	r.queueSent.Inc(endpoint)
+}
+
+// QueueRetried records a background retry that failed transiently and
+// rescheduled.
+func (r *Recorder) QueueRetried(endpoint string) {
+	if r == nil {
+		return
+	}
+	r.queueRetried.Inc(endpoint)
+}
+
+// QueueDeadLettered records a queued submission abandoned as failed.
+func (r *Recorder) QueueDeadLettered(endpoint string) {
+	if r == nil {
+		return
+	}
+	r.queueDeadLetter.Inc(endpoint)
+}
+
+// SetStorageHealthy flips the FR80 canary gauge.
+func (r *Recorder) SetStorageHealthy(healthy bool) {
+	if r == nil {
+		return
+	}
+	v := 0.0
+	if healthy {
+		v = 1
+	}
+	r.storageHealthy.Set(v)
+}
+
+// SetQueueDepth publishes the current retry-queue depth.
+func (r *Recorder) SetQueueDepth(n int) {
+	if r == nil {
+		return
+	}
+	r.retryQueueDepth.Set(float64(n))
 }

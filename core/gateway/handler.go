@@ -35,6 +35,7 @@ import (
 	"github.com/craigmccaskill/posthorn/reputation"
 	"github.com/craigmccaskill/posthorn/response"
 	"github.com/craigmccaskill/posthorn/spam"
+	"github.com/craigmccaskill/posthorn/storage"
 	"github.com/craigmccaskill/posthorn/template"
 	"github.com/craigmccaskill/posthorn/transport"
 	"github.com/craigmccaskill/posthorn/validate"
@@ -66,9 +67,10 @@ type Handler struct {
 	cfg                  config.EndpointConfig
 	transport            transport.Transport
 	renderer             *template.Renderer
+	storageGate          *storage.Gate      // nil = no [storage]; v1.x behavior
 	limiter              *ratelimit.Limiter // nil if rate_limit not configured
 	authFailLimiter      *ratelimit.Limiter // nil on form-mode endpoints; per-IP brute-force defense for api-mode 401s
-	idemCache            *idempotency.Cache // nil on form-mode endpoints
+	idemCache            idempotency.Cacher // nil on form-mode endpoints; Durable when storage attached (FR81)
 	trustedProxies       []netip.Prefix
 	emailField           string        // resolved at construction (cfg.EmailField or default)
 	maxBodySize          int64         // 0 = no cap
@@ -929,12 +931,49 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// FR77: persist the submission (status "sending") before the send so
+	// a crash mid-send is recoverable (NFR28). Best-effort: a storage
+	// failure degrades, never blocks (NFR27).
+	persisted, queueable := h.recordSubmission(submissionID, msg, r)
+
 	// Send with retry policy (FR19-22) under the request hard timeout.
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
 
 	result, err := transport.SendWithRetry(ctx, h.transport, msg, logger)
 	if err != nil {
+		// FR78/ADR-21: transient exhaustion with storage available moves
+		// the submission to the background queue instead of dropping it.
+		// Terminal errors never queue — retrying them is noise.
+		if queueable && transport.IsRetryable(err) {
+			if qerr := h.storageGate.Store().Enqueue(submissionID, time.Now()); qerr != nil {
+				h.storageGate.ReportError(qerr)
+			} else {
+				logger.Warn("submission_queued",
+					slog.String("error", err.Error()),
+					slog.Int64("latency_ms", time.Since(start).Milliseconds()),
+				)
+				h.recorder.Queued(h.cfg.Path, h.cfg.Transport.Type)
+				body := response.Success{Status: "queued", SubmissionID: submissionID}
+				if apiMode {
+					// Machine callers can distinguish accepted-later
+					// from sent; 2xx = terminally handled either way.
+					response.WriteJSON(w, http.StatusAccepted, body)
+				} else {
+					// A human submitter can't act on "queued"; Posthorn
+					// is now retrying, which beats v1.x's drop.
+					h.writeSuccessResponse(w, r, body)
+				}
+				return
+			}
+		}
+
+		if persisted {
+			if serr := h.storageGate.Store().MarkStatus(submissionID, storage.StatusFailed, err.Error()); serr != nil {
+				h.storageGate.ReportError(serr)
+			}
+		}
+
 		// Terminal failure — log payload (or just metadata if operator
 		// disabled it) so operators can recover from logs (FR16).
 		if h.logFailedSubmissions {
@@ -955,6 +994,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if persisted {
+		if serr := h.storageGate.Store().MarkSent(submissionID, result.MessageID, time.Now()); serr != nil {
+			h.storageGate.ReportError(serr)
+		}
+	}
+
 	latency := time.Since(start)
 	sentAttrs := []any{
 		slog.Int64("latency_ms", latency.Milliseconds()),
@@ -968,6 +1013,70 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Status:       "ok",
 		SubmissionID: submissionID,
 	})
+}
+
+// AttachStorage wires the optional storage gate (FR76). Called by
+// cmd/posthorn when a [storage] block is configured; tests attach
+// in-memory gates directly. Nil-safe: without it the handler is v1.x.
+//
+// For api-mode endpoints it also swaps the idempotency backend to the
+// storage-backed Durable (FR81, the ADR-8 seam): same contract, same
+// TTL, restart-survivable. idempotency_cache_size is a capacity for the
+// in-memory backend and is ignored by the durable one.
+func (h *Handler) AttachStorage(gate *storage.Gate) {
+	h.storageGate = gate
+	if h.cfg.Auth == config.AuthAPIKey {
+		h.idemCache = idempotency.NewDurable(gate, h.cfg.Path, idempotency.DefaultTTL)
+	}
+}
+
+// recordSubmission persists the pre-send row (FR77). Returns whether a
+// row was written and whether this submission may enter the retry queue
+// on transient exhaustion. Endpoints with log_failed_submissions =
+// false record metadata only and are never queue-eligible — the
+// operator said "don't persist submitter content on failure," and the
+// queue is exactly that (ADR-21).
+func (h *Handler) recordSubmission(id string, msg transport.Message, r *http.Request) (persisted, queueable bool) {
+	g := h.storageGate
+	if g == nil || !g.Healthy() {
+		return false, false
+	}
+	sub := storage.Submission{
+		ID:        id,
+		Endpoint:  h.cfg.Path,
+		Transport: h.cfg.Transport.Type,
+		Status:    storage.StatusSending,
+		CreatedAt: time.Now(),
+	}
+	if h.logFailedSubmissions {
+		queueable = true
+		sub.From = msg.From
+		sub.ToAddrs = msg.To
+		sub.ReplyTo = msg.ReplyTo
+		sub.Subject = msg.Subject
+		sub.BodyText = msg.BodyText
+		sub.BodyHTML = msg.BodyHTML
+		sub.Fields = storableFields(r.Form, h.cfg.Honeypot)
+		if !h.cfg.StripClientIP {
+			sub.ClientIP = ratelimit.ClientIP(r, h.trustedProxies)
+		}
+	}
+	if err := g.Store().RecordSubmission(sub); err != nil {
+		g.ReportError(err)
+		return false, false
+	}
+	return true, queueable
+}
+
+// storableFields is the raw-fields column content (FR77): the submitted
+// form minus structural token fields, with the honeypot value redacted
+// (same posture as the failure log).
+func storableFields(form map[string][]string, honeypot string) map[string][]string {
+	out := redactedForm(form, honeypot)
+	for _, structural := range []string{csrf.TokenField, pobTokenField, turnstileField, toOverrideField} {
+		delete(out, structural)
+	}
+	return out
 }
 
 // writeSuccessResponse emits a 200 response. When `redirect_success` is

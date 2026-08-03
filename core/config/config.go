@@ -27,6 +27,65 @@ type Config struct {
 	Endpoints    []EndpointConfig    `toml:"endpoints"`
 	Logging      LoggingConfig       `toml:"logging"`
 	SMTPListener *SMTPListenerConfig `toml:"smtp_listener"`
+	Storage      *StorageConfig      `toml:"storage"`
+}
+
+// StorageConfig is the optional top-level [storage] block (FR76,
+// ADR-20/21). Nil after parse means every storage-dependent v2.0
+// behavior is disabled and the pipeline is byte-identical to v1.x
+// (NFR25: presence-activates, never default-on).
+type StorageConfig struct {
+	// Path is the SQLite file location. Required unless InMemory.
+	Path string `toml:"path"`
+
+	// InMemory runs a private in-memory database — tests and dry
+	// evaluation only; nothing survives a restart.
+	InMemory bool `toml:"in_memory"`
+
+	// Retention bounds how long completed submission rows live (FR79).
+	// Default 30d. Suppressions are exempt by design (ADR-23).
+	Retention Duration `toml:"retention"`
+
+	// MaxSize caps the database file size (FR79) so Posthorn can never
+	// fill the disk on its own. Parsed like max_body_size ("1GB",
+	// "256MB"). Default 1GB.
+	MaxSize string `toml:"max_size"`
+}
+
+// Storage defaults applied by EffectiveRetention/EffectiveMaxSize.
+const (
+	DefaultStorageRetention = 30 * 24 * time.Hour
+	DefaultStorageMaxSize   = "1GB"
+)
+
+// EffectiveRetention returns the configured retention or the 30d default.
+func (s *StorageConfig) EffectiveRetention() time.Duration {
+	if s == nil || s.Retention.Std() <= 0 {
+		return DefaultStorageRetention
+	}
+	return s.Retention.Std()
+}
+
+// EffectiveMaxSize returns the configured cap string or the 1GB default.
+func (s *StorageConfig) EffectiveMaxSize() string {
+	if s == nil || s.MaxSize == "" {
+		return DefaultStorageMaxSize
+	}
+	return s.MaxSize
+}
+
+// Validate runs structural checks on the storage block.
+func (s *StorageConfig) Validate() error {
+	if s.Path == "" && !s.InMemory {
+		return errors.New("path is required (or set in_memory = true for tests)")
+	}
+	if s.Path != "" && s.InMemory {
+		return errors.New("path and in_memory are mutually exclusive")
+	}
+	if s.Retention.Std() < 0 {
+		return errors.New("retention must be positive")
+	}
+	return nil
 }
 
 // SMTPListenerConfig is the top-level [smtp_listener] block (FR62).
@@ -470,6 +529,12 @@ func (c *Config) Validate() error {
 	if c.SMTPListener != nil {
 		if err := c.SMTPListener.Validate(); err != nil {
 			return fmt.Errorf("smtp_listener: %w", err)
+		}
+	}
+
+	if c.Storage != nil {
+		if err := c.Storage.Validate(); err != nil {
+			return fmt.Errorf("storage: %w", err)
 		}
 	}
 
