@@ -36,6 +36,13 @@ type Recorder struct {
 	queueDeadLetter  *Counter
 	storageHealthy   *Gauge
 	retryQueueDepth  *Gauge
+
+	// v2.0 lifecycle + suppression surface (FR82-FR86). Label values
+	// are fixed enums / endpoint paths only (NFR30).
+	suppressed        *Counter
+	lifecycleEvents   *Counter
+	lifecycleDropped  *Counter
+	lifecycleForwards *Counter
 }
 
 // NewRecorder constructs a Recorder backed by counters and histograms
@@ -123,6 +130,26 @@ func NewRecorder(reg *Registry) *Recorder {
 			"Submissions currently waiting in (or claimed from) the retry queue.",
 			nil,
 		),
+		suppressed: NewCounter(
+			"posthorn_suppressed_recipients_total",
+			"Recipients removed from sends by the suppression list (FR86).",
+			[]string{"endpoint"},
+		),
+		lifecycleEvents: NewCounter(
+			"posthorn_lifecycle_events_total",
+			"Provider lifecycle events accepted and normalized. event is the fixed normalized enum.",
+			[]string{"event"},
+		),
+		lifecycleDropped: NewCounter(
+			"posthorn_lifecycle_dropped_total",
+			"Inbound lifecycle posts dropped without processing. reason is \"unmatched\" (no submission for the message ID) or \"malformed\".",
+			[]string{"reason"},
+		),
+		lifecycleForwards: NewCounter(
+			"posthorn_lifecycle_forwards_total",
+			"Callback forwarding outcomes per originating endpoint. outcome is \"sent\", \"queued\", or \"dropped\".",
+			[]string{"endpoint", "outcome"},
+		),
 	}
 	reg.Register(r.submitted)
 	reg.Register(r.sent)
@@ -140,6 +167,10 @@ func NewRecorder(reg *Registry) *Recorder {
 	reg.Register(r.queueDeadLetter)
 	reg.Register(r.storageHealthy)
 	reg.Register(r.retryQueueDepth)
+	reg.Register(r.suppressed)
+	reg.Register(r.lifecycleEvents)
+	reg.Register(r.lifecycleDropped)
+	reg.Register(r.lifecycleForwards)
 	return r
 }
 
@@ -278,4 +309,40 @@ func (r *Recorder) SetQueueDepth(n int) {
 		return
 	}
 	r.retryQueueDepth.Set(float64(n))
+}
+
+// Suppressed records recipients removed from a send by the suppression
+// list (FR86). n is the number of removed recipients.
+func (r *Recorder) Suppressed(endpoint string, n int) {
+	if r == nil || n <= 0 {
+		return
+	}
+	r.suppressed.Add(int64(n), endpoint)
+}
+
+// LifecycleEvent records one accepted, normalized provider event. kind
+// must be a lifecycle.Event* enum value (NFR30).
+func (r *Recorder) LifecycleEvent(kind string) {
+	if r == nil {
+		return
+	}
+	r.lifecycleEvents.Inc(kind)
+}
+
+// LifecycleDropped records an inbound event post dropped without
+// processing. reason is "unmatched" or "malformed".
+func (r *Recorder) LifecycleDropped(reason string) {
+	if r == nil {
+		return
+	}
+	r.lifecycleDropped.Inc(reason)
+}
+
+// LifecycleForward records a callback delivery outcome ("sent",
+// "queued", "dropped").
+func (r *Recorder) LifecycleForward(endpoint, outcome string) {
+	if r == nil {
+		return
+	}
+	r.lifecycleForwards.Inc(endpoint, outcome)
 }

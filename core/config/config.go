@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/mail"
 	"net/netip"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -28,6 +29,29 @@ type Config struct {
 	Logging      LoggingConfig       `toml:"logging"`
 	SMTPListener *SMTPListenerConfig `toml:"smtp_listener"`
 	Storage      *StorageConfig      `toml:"storage"`
+	Lifecycle    *LifecycleConfig    `toml:"lifecycle"`
+}
+
+// LifecycleConfig is the optional top-level [lifecycle] block (FR82,
+// ADR-22). Presence enables the Postmark event-ingestion endpoint
+// (`/events/postmark`) on the main HTTP listener. Requires [storage]
+// (event correlation reads the submission log) — enforced in
+// Config.Validate. Basic auth is mandatory and fail-closed: Posthorn's
+// first inbound-from-a-third-party surface never runs open (NFR25).
+type LifecycleConfig struct {
+	// BasicAuthUsername/BasicAuthPassword protect the event endpoint.
+	// Postmark supports setting both on the webhook URL natively. The
+	// password falls under NFR3/NFR29: never logged.
+	BasicAuthUsername string `toml:"basic_auth_username"`
+	BasicAuthPassword string `toml:"basic_auth_password"`
+}
+
+// Validate runs structural checks on the lifecycle block.
+func (l *LifecycleConfig) Validate() error {
+	if l.BasicAuthUsername == "" || l.BasicAuthPassword == "" {
+		return errors.New("basic_auth_username and basic_auth_password are required (the event endpoint never runs unauthenticated)")
+	}
+	return nil
 }
 
 // StorageConfig is the optional top-level [storage] block (FR76,
@@ -234,6 +258,17 @@ type EndpointConfig struct {
 	// #33). The escalation tier — stops bots that render JS. See
 	// CaptchaConfig.
 	Captcha *CaptchaConfig `toml:"captcha"`
+
+	// v2.0 block E: lifecycle callbacks (FR84). When WebhookURL is set,
+	// normalized delivery/bounce/complaint events for mail sent through
+	// this endpoint are POSTed there, signed with HMAC-SHA256 of the
+	// body under WebhookSecret (X-Posthorn-Signature: sha256=<hex>).
+	// Requires the top-level [lifecycle] block — a webhook_url with no
+	// event ingestion would never fire, which is exactly the
+	// looks-configured-but-isn't footgun ADR-10 exists to prevent.
+	// WebhookSecret falls under NFR3/NFR29: never logged.
+	WebhookURL    string `toml:"webhook_url"`
+	WebhookSecret string `toml:"webhook_secret"`
 }
 
 // CaptchaConfig configures the optional captcha check
@@ -538,6 +573,22 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// FR82: lifecycle rides the submission log; without storage there is
+	// nothing to correlate events against.
+	if c.Lifecycle != nil {
+		if err := c.Lifecycle.Validate(); err != nil {
+			return fmt.Errorf("lifecycle: %w", err)
+		}
+		if c.Storage == nil {
+			return errors.New("lifecycle: requires a [storage] block (event correlation reads the submission log)")
+		}
+	}
+	for i, ep := range c.Endpoints {
+		if ep.WebhookURL != "" && c.Lifecycle == nil {
+			return fmt.Errorf("endpoints[%d] (%s): webhook_url requires a top-level [lifecycle] block — without event ingestion the callback would never fire", i, ep.Path)
+		}
+	}
+
 	return nil
 }
 
@@ -664,6 +715,22 @@ func (e *EndpointConfig) Validate() error {
 	}
 	if e.TextBody != "" && e.BodyFormat != BodyFormatHTML {
 		return errors.New("text_body: only valid when body_format = \"html\" (text endpoints render body directly; there is no fallback part)")
+	}
+
+	// FR84: webhook callback pairing. The secret gate is ≥16 bytes —
+	// HMAC with a short secret is decorative (proof_of_browser
+	// precedent).
+	if e.WebhookURL != "" {
+		u, err := url.Parse(e.WebhookURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("webhook_url: must be an absolute http(s) URL, got %q", e.WebhookURL)
+		}
+		if len(e.WebhookSecret) < 16 {
+			return errors.New("webhook_secret: required with webhook_url and must be at least 16 bytes")
+		}
+	}
+	if e.WebhookSecret != "" && e.WebhookURL == "" {
+		return errors.New("webhook_secret: only valid alongside webhook_url")
 	}
 
 	if err := e.Transport.Validate(); err != nil {
