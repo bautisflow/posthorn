@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -79,12 +80,19 @@ func NewPostmarkTransport(apiKey, baseURL string) *PostmarkTransport {
 // NFR1 implications before adding (especially anything that might let
 // callers smuggle structural data, e.g., a Headers []map field).
 type postmarkRequest struct {
-	From     string `json:"From"`
-	To       string `json:"To"`
-	ReplyTo  string `json:"ReplyTo,omitempty"`
-	Subject  string `json:"Subject"`
-	TextBody string `json:"TextBody"`
-	HtmlBody string `json:"HtmlBody,omitempty"`
+	From        string               `json:"From"`
+	To          string               `json:"To"`
+	ReplyTo     string               `json:"ReplyTo,omitempty"`
+	Subject     string               `json:"Subject"`
+	TextBody    string               `json:"TextBody"`
+	HtmlBody    string               `json:"HtmlBody,omitempty"`
+	Attachments []postmarkAttachment `json:"Attachments,omitempty"`
+}
+
+type postmarkAttachment struct {
+	Name        string `json:"Name"`
+	Content     string `json:"Content"` // base64
+	ContentType string `json:"ContentType"`
 }
 
 // postmarkResponse captures the fields we read from Postmark's JSON reply.
@@ -113,6 +121,13 @@ func (p *PostmarkTransport) Send(ctx context.Context, msg Message) (SendResult, 
 		Subject:  msg.Subject,
 		TextBody: msg.BodyText,
 		HtmlBody: msg.BodyHTML,
+	}
+	for _, a := range msg.Attachments {
+		body.Attachments = append(body.Attachments, postmarkAttachment{
+			Name:        a.Filename,
+			Content:     base64.StdEncoding.EncodeToString(a.Data),
+			ContentType: a.ContentType,
+		})
 	}
 	buf, err := json.Marshal(body)
 	if err != nil {

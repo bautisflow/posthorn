@@ -332,9 +332,9 @@ Block E is the v2.0 release, recut 2026-08-02 against the integration-seam USP (
 
 ### Webhook transport
 
-**FR88.** A `type = "webhook"` transport **must** POST submissions as JSON to a configured `url`: envelope (from/to/reply-to/subject), rendered bodies, raw `fields`, endpoint path, submission ID, timestamp. The body is signed `X-Posthorn-Signature: sha256=<HMAC-SHA256>` with the configured `secret` (NFR3 applies). Optional operator-defined static headers are allowed. Status mapping follows FR19-22 (2xx success, 429 rate-limited, 5xx transient, other 4xx terminal).
+**FR88.** A `type = "webhook"` transport **must** POST submissions as JSON to a configured `url`: submission ID, envelope (from/to/reply-to/subject), rendered bodies, and raw `fields`. The body is signed `X-Posthorn-Signature: sha256=<HMAC-SHA256>` with the configured `secret` (NFR3 applies). Optional operator-defined static headers are allowed (reserved headers rejected at parse time). Status mapping follows FR19-22 (2xx success, 429 rate-limited, 5xx transient, other 4xx terminal). *(Amended during Story 16.2: endpoint path and timestamp dropped from the payload — the receiver is per-endpoint by construction and timestamps on receipt; neither value crosses the ADR-12 boundary, and a static custom header covers operator labeling.)*
 
-**FR89.** `transport.Message` gains optional `Fields` (raw submitted key/values) per ADR-24's amendment of ADR-12: populated by HTTP ingresses, nil from the SMTP listener, ignored by all mail transports, and **never** interpolated into any header at any layer (NFR1 restated for it explicitly).
+**FR89.** `transport.Message` gains optional `Fields` (raw submitted key/values) and `SubmissionID` per ADR-24's amendment of ADR-12: populated by HTTP ingresses (SubmissionID by both ingresses and the retry worker — at-least-once replays need it for receiver-side dedup), Fields nil from the SMTP listener, both ignored by all mail transports, and **never** interpolated into any header at any layer (NFR1 restated for it explicitly).
 
 ### File attachments
 

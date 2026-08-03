@@ -177,6 +177,7 @@ CREATE TABLE IF NOT EXISTS submissions (
   body_text            TEXT NOT NULL DEFAULT '',
   body_html            TEXT NOT NULL DEFAULT '',
   fields               TEXT NOT NULL DEFAULT '{}',
+  attachments          TEXT NOT NULL DEFAULT '[]',
   client_ip            TEXT NOT NULL DEFAULT '',
   status               TEXT NOT NULL,
   transport_message_id TEXT NOT NULL DEFAULT '',
@@ -260,12 +261,22 @@ type Submission struct {
 	BodyText           string
 	BodyHTML           string
 	Fields             map[string][]string
+	Attachments        []Attachment
 	ClientIP           string
 	Status             string
 	TransportMessageID string
 	LastError          string
 	CreatedAt          time.Time
 	SentAt             time.Time // zero when unsent
+}
+
+// Attachment mirrors transport.Attachment for persistence (FR92 —
+// queued sends must replay with their files). Data JSON-encodes as
+// base64.
+type Attachment struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	Data        []byte `json:"data"`
 }
 
 // RecordSubmission inserts a new row (FR77).
@@ -278,6 +289,14 @@ func (s *Store) RecordSubmission(sub Submission) error {
 	if err != nil {
 		return fmt.Errorf("storage: marshal fields: %w", err)
 	}
+	atts := sub.Attachments
+	if atts == nil {
+		atts = []Attachment{}
+	}
+	attJSON, err := json.Marshal(atts)
+	if err != nil {
+		return fmt.Errorf("storage: marshal attachments: %w", err)
+	}
 	var sentAt any
 	if !sub.SentAt.IsZero() {
 		sentAt = sub.SentAt.Unix()
@@ -285,12 +304,13 @@ func (s *Store) RecordSubmission(sub Submission) error {
 	_, err = s.db.Exec(`
 		INSERT INTO submissions
 		  (id, endpoint, transport, from_addr, to_addrs, reply_to, subject,
-		   body_text, body_html, fields, client_ip, status,
+		   body_text, body_html, fields, attachments, client_ip, status,
 		   transport_message_id, last_error, created_at, sent_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sub.ID, sub.Endpoint, sub.Transport, sub.From, string(toJSON), sub.ReplyTo,
-		sub.Subject, sub.BodyText, sub.BodyHTML, string(fieldsJSON), sub.ClientIP,
-		sub.Status, sub.TransportMessageID, sub.LastError, sub.CreatedAt.Unix(), sentAt)
+		sub.Subject, sub.BodyText, sub.BodyHTML, string(fieldsJSON), string(attJSON),
+		sub.ClientIP, sub.Status, sub.TransportMessageID, sub.LastError,
+		sub.CreatedAt.Unix(), sentAt)
 	if err != nil {
 		return fmt.Errorf("storage: record submission: %w", err)
 	}
@@ -340,17 +360,17 @@ func (s *Store) FindByMessageID(transportMessageID string) (Submission, bool, er
 func (s *Store) scanOne(where string, args ...any) (Submission, bool, error) {
 	row := s.db.QueryRow(`
 		SELECT id, endpoint, transport, from_addr, to_addrs, reply_to, subject,
-		       body_text, body_html, fields, client_ip, status,
+		       body_text, body_html, fields, attachments, client_ip, status,
 		       transport_message_id, last_error, created_at, sent_at
 		FROM submissions `+where, args...)
 
 	var sub Submission
-	var toJSON, fieldsJSON string
+	var toJSON, fieldsJSON, attJSON string
 	var createdAt int64
 	var sentAt sql.NullInt64
 	err := row.Scan(&sub.ID, &sub.Endpoint, &sub.Transport, &sub.From, &toJSON,
 		&sub.ReplyTo, &sub.Subject, &sub.BodyText, &sub.BodyHTML, &fieldsJSON,
-		&sub.ClientIP, &sub.Status, &sub.TransportMessageID, &sub.LastError,
+		&attJSON, &sub.ClientIP, &sub.Status, &sub.TransportMessageID, &sub.LastError,
 		&createdAt, &sentAt)
 	if err == sql.ErrNoRows {
 		return Submission{}, false, nil
@@ -363,6 +383,12 @@ func (s *Store) scanOne(where string, args ...any) (Submission, bool, error) {
 	}
 	if err := json.Unmarshal([]byte(fieldsJSON), &sub.Fields); err != nil {
 		return Submission{}, false, fmt.Errorf("storage: decode fields: %w", err)
+	}
+	if err := json.Unmarshal([]byte(attJSON), &sub.Attachments); err != nil {
+		return Submission{}, false, fmt.Errorf("storage: decode attachments: %w", err)
+	}
+	if len(sub.Attachments) == 0 {
+		sub.Attachments = nil
 	}
 	sub.CreatedAt = time.Unix(createdAt, 0).UTC()
 	if sentAt.Valid {

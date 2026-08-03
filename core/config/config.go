@@ -259,6 +259,11 @@ type EndpointConfig struct {
 	// CaptchaConfig.
 	Captcha *CaptchaConfig `toml:"captcha"`
 
+	// v2.0 block E: file attachments (FR90, ADR-25). Opt-in: without
+	// this block, form-mode file parts are dropped exactly as v1.x and
+	// api-mode attachments are rejected. See AttachmentsConfig.
+	Attachments *AttachmentsConfig `toml:"attachments"`
+
 	// v2.0 block E: lifecycle callbacks (FR84). When WebhookURL is set,
 	// normalized delivery/bounce/complaint events for mail sent through
 	// this endpoint are POSTed there, signed with HMAC-SHA256 of the
@@ -269,6 +274,67 @@ type EndpointConfig struct {
 	// WebhookSecret falls under NFR3/NFR29: never logged.
 	WebhookURL    string `toml:"webhook_url"`
 	WebhookSecret string `toml:"webhook_secret"`
+}
+
+// AttachmentsConfig configures opt-in file attachments
+// (`[endpoints.attachments]`, FR90/FR91, ADR-25). AllowedTypes is
+// deliberately required with no default: any default list is a silent
+// security decision made on the operator's behalf. Enforcement runs
+// against the sniffed content type of the actual bytes — the
+// client-declared type is attacker-controlled and ignored for
+// authorization.
+type AttachmentsConfig struct {
+	// AllowedTypes is the accepted content-type allowlist. Exact
+	// ("application/pdf") or family wildcard ("image/*"). Matched
+	// against the sniffed type, so only sniffable types are usable —
+	// text-family formats (CSV etc.) sniff as text/plain.
+	AllowedTypes []string `toml:"allowed_types"`
+
+	// MaxCount bounds files per submission. Default 5.
+	MaxCount int `toml:"max_count"`
+
+	// MaxTotalSize bounds the combined decoded size ("10MB" default).
+	MaxTotalSize string `toml:"max_total_size"`
+}
+
+// Attachment defaults.
+const (
+	DefaultAttachmentMaxCount  = 5
+	DefaultAttachmentTotalSize = "10MB"
+)
+
+// EffectiveMaxCount returns MaxCount or the default.
+func (a *AttachmentsConfig) EffectiveMaxCount() int {
+	if a == nil || a.MaxCount <= 0 {
+		return DefaultAttachmentMaxCount
+	}
+	return a.MaxCount
+}
+
+// EffectiveMaxTotalSize returns MaxTotalSize or the default.
+func (a *AttachmentsConfig) EffectiveMaxTotalSize() string {
+	if a == nil || a.MaxTotalSize == "" {
+		return DefaultAttachmentTotalSize
+	}
+	return a.MaxTotalSize
+}
+
+// Validate runs structural checks on the attachments block (ADR-25
+// fail-closed rules).
+func (a *AttachmentsConfig) Validate() error {
+	if len(a.AllowedTypes) == 0 {
+		return errors.New("allowed_types: required — attachments are fail-closed, name the types you accept (e.g. [\"application/pdf\", \"image/*\"])")
+	}
+	for i, t := range a.AllowedTypes {
+		parts := strings.Split(t, "/")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" || t != strings.ToLower(t) {
+			return fmt.Errorf("allowed_types[%d]: %q is not a lowercase type/subtype or type/* pattern", i, t)
+		}
+	}
+	if a.MaxCount < 0 {
+		return errors.New("max_count must be positive")
+	}
+	return nil
 }
 
 // CaptchaConfig configures the optional captcha check
@@ -731,6 +797,13 @@ func (e *EndpointConfig) Validate() error {
 	}
 	if e.WebhookSecret != "" && e.WebhookURL == "" {
 		return errors.New("webhook_secret: only valid alongside webhook_url")
+	}
+
+	// FR90/FR91: attachments block (fail-closed).
+	if e.Attachments != nil {
+		if err := e.Attachments.Validate(); err != nil {
+			return fmt.Errorf("attachments: %w", err)
+		}
 	}
 
 	if err := e.Transport.Validate(); err != nil {

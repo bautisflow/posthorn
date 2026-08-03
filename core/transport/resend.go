@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -72,6 +73,14 @@ type resendRequest struct {
 	Subject string   `json:"subject"`
 	Text    string   `json:"text"`
 	HTML    string   `json:"html,omitempty"`
+
+	Attachments []resendAttachment `json:"attachments,omitempty"`
+}
+
+type resendAttachment struct {
+	Filename    string `json:"filename"`
+	Content     string `json:"content"` // base64
+	ContentType string `json:"content_type,omitempty"`
 }
 
 // resendSuccessResponse is the 200 OK body shape. Only the message ID
@@ -105,6 +114,13 @@ func (r *ResendTransport) Send(ctx context.Context, msg Message) (SendResult, er
 		Subject: msg.Subject,
 		Text:    msg.BodyText,
 		HTML:    msg.BodyHTML,
+	}
+	for _, a := range msg.Attachments {
+		body.Attachments = append(body.Attachments, resendAttachment{
+			Filename:    a.Filename,
+			Content:     base64.StdEncoding.EncodeToString(a.Data),
+			ContentType: a.ContentType,
+		})
 	}
 	buf, err := json.Marshal(body)
 	if err != nil {

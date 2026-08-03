@@ -117,12 +117,19 @@ func (w *Worker) attempt(ctx context.Context, entry DueRetry, hooks Hooks) {
 	)
 
 	msg := transport.Message{
-		From:     entry.From,
-		To:       entry.ToAddrs,
-		ReplyTo:  entry.ReplyTo,
-		Subject:  entry.Subject,
-		BodyText: entry.BodyText,
-		BodyHTML: entry.BodyHTML,
+		From:         entry.From,
+		To:           entry.ToAddrs,
+		ReplyTo:      entry.ReplyTo,
+		Subject:      entry.Subject,
+		BodyText:     entry.BodyText,
+		BodyHTML:     entry.BodyHTML,
+		SubmissionID: entry.ID,
+		Fields:       entry.Fields,
+	}
+	for _, a := range entry.Attachments {
+		msg.Attachments = append(msg.Attachments, transport.Attachment{
+			Filename: a.Filename, ContentType: a.ContentType, Data: a.Data,
+		})
 	}
 
 	res, err := w.Send(ctx, entry.Endpoint, msg)

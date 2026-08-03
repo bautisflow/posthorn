@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -51,6 +52,10 @@ const defaultEmailField = "email"
 // overridable — see ADR-11 for the safety reasoning.
 const toOverrideField = "to_override"
 
+// attachmentsField is the structural api-mode JSON key for file
+// attachments (FR90) — never a template field.
+const attachmentsField = "attachments"
+
 // requestTimeout is the hard upper bound on a single submission's
 // processing time, including any retries (FR22). Declared as a var so
 // tests can override; production never mutates it. The retry delays
@@ -72,10 +77,11 @@ type Handler struct {
 	authFailLimiter      *ratelimit.Limiter // nil on form-mode endpoints; per-IP brute-force defense for api-mode 401s
 	idemCache            idempotency.Cacher // nil on form-mode endpoints; Durable when storage attached (FR81)
 	trustedProxies       []netip.Prefix
-	emailField           string        // resolved at construction (cfg.EmailField or default)
-	maxBodySize          int64         // 0 = no cap
-	logFailedSubmissions bool          // resolved at construction (default true)
-	csrfTokenTTL         time.Duration // resolved at construction (cfg.CSRFTokenTTL or default)
+	emailField           string            // resolved at construction (cfg.EmailField or default)
+	maxBodySize          int64             // 0 = no cap
+	logFailedSubmissions bool              // resolved at construction (default true)
+	csrfTokenTTL         time.Duration     // resolved at construction (cfg.CSRFTokenTTL or default)
+	attachPolicy         *attachmentPolicy // nil = attachments not opted in (FR90)
 	logger               *slog.Logger
 	recorder             *metrics.Recorder // nil = no-op (default)
 
@@ -295,6 +301,12 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 	// max_body_size defaults to 1 MB when unset — safe-by-default so a
 	// stray unconfigured endpoint can't be DoS'd by streaming an unbounded
 	// body. Operators bump it up for large form uploads.
+	// FR90/FR91: attachment policy, parsed once.
+	attachPolicy, err := newAttachmentPolicy(cfg.Attachments)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: %w", err)
+	}
+
 	rawMaxBodySize := cfg.MaxBodySize
 	if rawMaxBodySize == "" {
 		rawMaxBodySize = "1MB"
@@ -302,6 +314,17 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 	maxBody, err := spam.ParseSize(rawMaxBodySize)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: max_body_size: %w", err)
+	}
+	if attachPolicy != nil {
+		if cfg.MaxBodySize == "" {
+			// Unset max_body_size on an attachment endpoint defaults to
+			// the attachment budget plus 1MB of form headroom — the 1MB
+			// default would reject every payload the operator just
+			// opted into (FR91).
+			maxBody = attachPolicy.maxTotal + 1<<20
+		} else if maxBody < attachPolicy.maxTotal {
+			return nil, fmt.Errorf("gateway: max_body_size (%d bytes) is smaller than attachments.max_total_size (%d bytes) — every allowed attachment set would be rejected at the body cap", maxBody, attachPolicy.maxTotal)
+		}
 	}
 
 	prefixes, err := ratelimit.ParsePrefixes(cfg.TrustedProxies)
@@ -381,6 +404,7 @@ func New(cfg config.EndpointConfig, t transport.Transport, opts ...Option) (*Han
 		maxBodySize:          maxBody,
 		logFailedSubmissions: logFailed,
 		csrfTokenTTL:         csrfTTL,
+		attachPolicy:         attachPolicy,
 		logger:               log.Discard(), // overridable via WithLogger
 		headerChecks:         buildHeaderChecks(cfg),
 		pob:                  pob,
@@ -617,6 +641,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// API mode uses the matched API key (FR35), which requires the auth
 	// check to run before the rate-limit gate.
 	var rateLimitKey string
+	var attachments []transport.Attachment // FR90: populated only on opted-in endpoints
 	if apiMode {
 		// FR34: parse Authorization: Bearer <key>; constant-time match
 		// against api_keys list (NFR19). Failed auth: 401 with no key
@@ -737,7 +762,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "JSON body required (application/json)", http.StatusUnsupportedMediaType)
 			return
 		}
-		values, err := parseJSONBody(r.Body)
+		values, rawAttachments, err := parseJSONBody(r.Body)
 		if err != nil {
 			var maxErr *http.MaxBytesError
 			if errors.As(err, &maxErr) {
@@ -767,8 +792,35 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		r.Form = values
+		// FR90: api-mode attachments. Not opted in + present → 422; the
+		// caller configured a payload the endpoint won't honor, and
+		// silent dropping is the ADR-10 footgun.
+		if len(rawAttachments) > 0 && h.attachPolicy == nil {
+			h.recorder.ValidationFailed(h.cfg.Path)
+			response.WriteJSON(w, http.StatusUnprocessableEntity,
+				response.Validation(nil, map[string]string{
+					"attachments": "this endpoint does not accept attachments ([endpoints.attachments] not configured)",
+				}))
+			return
+		}
+		if h.attachPolicy != nil && len(rawAttachments) > 0 {
+			candidates, derr := decodeAPIAttachments(rawAttachments)
+			if derr != nil {
+				var vis *clientVisibleError
+				msg := "malformed attachments"
+				if errors.As(derr, &vis) {
+					msg = vis.msg
+				}
+				h.writeErrorResponse(w, r, http.StatusBadRequest, msg)
+				return
+			}
+			var vetOK bool
+			if attachments, vetOK = h.vetAttachments(w, r, candidates); !vetOK {
+				return
+			}
+		}
 	} else {
-		if err := r.ParseForm(); err != nil {
+		if err := h.parseFormBody(r); err != nil {
 			var maxErr *http.MaxBytesError
 			if errors.As(err, &maxErr) {
 				logger.Info("body_too_large",
@@ -787,6 +839,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			)
 			h.writeErrorResponse(w, r, http.StatusBadRequest, "malformed request body")
 			return
+		}
+		// FR90: form-mode file parts. Without the opt-in block, files
+		// are dropped exactly as v1.x. With it, they're read, sniffed,
+		// and vetted.
+		if h.attachPolicy != nil && r.MultipartForm != nil {
+			candidates, cerr := collectMultipartFiles(r)
+			if cerr != nil {
+				logger.Info("body_parse_failed",
+					slog.String("kind", "multipart-file"),
+					slog.String("reason", cerr.Error()),
+					slog.Int64("latency_ms", time.Since(start).Milliseconds()),
+				)
+				h.writeErrorResponse(w, r, http.StatusBadRequest, "malformed request body")
+				return
+			}
+			var vetOK bool
+			if attachments, vetOK = h.vetAttachments(w, r, candidates); !vetOK {
+				return
+			}
 		}
 	}
 
@@ -888,11 +959,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	msg := transport.Message{
-		From:     h.cfg.From,
-		To:       toAddresses,
-		Subject:  subject,
-		BodyText: body,
-		BodyHTML: bodyHTML,
+		From:         h.cfg.From,
+		To:           toAddresses,
+		Subject:      subject,
+		BodyText:     body,
+		BodyHTML:     bodyHTML,
+		SubmissionID: submissionID,
+		Fields:       storableFields(r.Form, h.cfg.Honeypot),
+		Attachments:  attachments,
 	}
 
 	// Reply-To header (PRD Open Question 4): when the operator names a
@@ -1136,7 +1210,12 @@ func (h *Handler) recordSubmission(id string, msg transport.Message, r *http.Req
 		sub.Subject = msg.Subject
 		sub.BodyText = msg.BodyText
 		sub.BodyHTML = msg.BodyHTML
-		sub.Fields = storableFields(r.Form, h.cfg.Honeypot)
+		sub.Fields = msg.Fields
+		for _, a := range msg.Attachments {
+			sub.Attachments = append(sub.Attachments, storage.Attachment{
+				Filename: a.Filename, ContentType: a.ContentType, Data: a.Data,
+			})
+		}
 		if !h.cfg.StripClientIP {
 			sub.ClientIP = ratelimit.ClientIP(r, h.trustedProxies)
 		}
@@ -1377,6 +1456,37 @@ type clientVisibleError struct{ msg string }
 
 func (e *clientVisibleError) Error() string { return e.msg }
 
+// parseFormBody parses the request body for form-mode. multipart/form-data
+// goes through ParseMultipartForm — plain ParseForm silently ignores
+// multipart bodies (their fields never reached the pipeline before
+// v2.0; found and fixed during Story 17.1). The 4MB threshold is the
+// in-memory limit before file parts spill to disk; the request body as
+// a whole is already bounded by MaxBytesReader.
+func (h *Handler) parseFormBody(r *http.Request) error {
+	ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if ct == "multipart/form-data" {
+		return r.ParseMultipartForm(4 << 20)
+	}
+	return r.ParseForm()
+}
+
+// vetAttachments enforces the endpoint's attachment policy and writes
+// the 422 response on violation (FR91). Returns ok=false when a
+// response was written.
+func (h *Handler) vetAttachments(w http.ResponseWriter, r *http.Request, candidates []transport.Attachment) ([]transport.Attachment, bool) {
+	accepted, violations := h.attachPolicy.vet(candidates)
+	if len(violations) == 0 {
+		return accepted, true
+	}
+	fieldErrors := make(map[string]string, len(violations))
+	for _, v := range violations {
+		fieldErrors[v.Name] = v.Reason
+	}
+	h.recorder.ValidationFailed(h.cfg.Path)
+	h.writeValidationErrorResponse(w, r, response.Validation(nil, fieldErrors))
+	return nil, false
+}
+
 // parseJSONBody decodes a JSON object request body into a url.Values map,
 // matching the shape produced by r.ParseForm so the downstream validation,
 // templating, and transport pipeline can be ingress-agnostic (FR36, FR38,
@@ -1393,17 +1503,34 @@ func (e *clientVisibleError) Error() string { return e.msg }
 //     form-mode multi-value fields like `name=a&name=b`).
 //   - Nested objects, top-level non-object bodies, and arrays containing
 //     non-primitives are rejected with a clear error (HTTP 400 via caller).
-func parseJSONBody(body io.Reader) (url.Values, error) {
+//
+// The "attachments" key is structural as of v2.0 (FR90): an array of
+// {filename, content_type, data} objects returned separately, never a
+// template field. Endpoints without the attachments opt-in reject
+// requests carrying it (422, in the caller).
+func parseJSONBody(body io.Reader) (url.Values, []apiAttachment, error) {
 	raw := make(map[string]any)
 	dec := json.NewDecoder(body)
 	if err := dec.Decode(&raw); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Reject trailing content after the top-level object — e.g. `{"a":1}{"b":2}`
 	// or `{}garbage`. dec.More() reports whether the decoder has more JSON
 	// values to consume from the stream.
 	if dec.More() {
-		return nil, &clientVisibleError{"unexpected trailing content after top-level JSON object"}
+		return nil, nil, &clientVisibleError{"unexpected trailing content after top-level JSON object"}
+	}
+
+	var attachments []apiAttachment
+	if rawAtt, present := raw[attachmentsField]; present {
+		delete(raw, attachmentsField)
+		reencoded, err := json.Marshal(rawAtt)
+		if err != nil {
+			return nil, nil, &clientVisibleError{"attachments: unencodable value"}
+		}
+		if err := json.Unmarshal(reencoded, &attachments); err != nil {
+			return nil, nil, &clientVisibleError{`attachments: must be an array of {"filename", "content_type", "data"} objects`}
+		}
 	}
 
 	out := make(url.Values, len(raw))
@@ -1420,16 +1547,16 @@ func parseJSONBody(body io.Reader) (url.Values, error) {
 		case []any:
 			strs, err := coerceJSONArray(k, val)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out[k] = strs
 		case map[string]any:
-			return nil, &clientVisibleError{fmt.Sprintf("nested objects are not supported in v1.1 (field %q is an object)", k)}
+			return nil, nil, &clientVisibleError{fmt.Sprintf("nested objects are not supported in v1.1 (field %q is an object)", k)}
 		default:
-			return nil, &clientVisibleError{fmt.Sprintf("unsupported JSON type for field %q: %T", k, v)}
+			return nil, nil, &clientVisibleError{fmt.Sprintf("unsupported JSON type for field %q: %T", k, v)}
 		}
 	}
-	return out, nil
+	return out, attachments, nil
 }
 
 // coerceJSONArray handles []any values from json.Unmarshal — converts

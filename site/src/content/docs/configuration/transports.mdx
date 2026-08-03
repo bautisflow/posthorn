@@ -26,6 +26,18 @@ Different endpoints in one Posthorn instance can use different transports, or di
 | **Mailgun** | Higher-volume transactional. EU region available. | HTTP Basic (`api:<key>`) | multipart/form-data |
 | **AWS SES** | AWS-native deployments. Cheapest per-message at volume. Operator owns deliverability. | AWS SigV4 | JSON |
 | **Outbound SMTP** | Operator-controlled relay (self-hosted Postfix, Mailgun's SMTP gateway, Mailtrap for testing). The "I want SMTP" fallback. | SMTP AUTH PLAIN | SMTP DATA |
+| **Webhook** (v2.0) | Non-mail sink: deliver the structured submission as a signed JSON POST to a receiver you run. | HMAC signature (+ your own static headers) | JSON |
+
+### Capability matrix (v2.0)
+
+Sending capabilities are uniform; [lifecycle event](/features/lifecycle/) ingestion is not — it's built per provider dialect, Postmark first.
+
+| Capability | Postmark | Resend | Mailgun | SES | SMTP out | Webhook |
+|---|---|---|---|---|---|---|
+| Text / HTML body | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (both in payload) |
+| Attachments | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| Retry queue eligible | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Lifecycle events in | ✓ | on demand | on demand | on demand | n/a | n/a |
 
 <CardGrid>
   <LinkCard title="Postmark" href="/configuration/transports/postmark/" description="X-Postmark-Server-Token, JSON, recommended default." />
@@ -33,6 +45,7 @@ Different endpoints in one Posthorn instance can use different transports, or di
   <LinkCard title="Mailgun" href="/configuration/transports/mailgun/" description="HTTP Basic, multipart, US + EU regions." />
   <LinkCard title="AWS SES" href="/configuration/transports/ses/" description="SigV4, JSON, region-scoped endpoints." />
   <LinkCard title="Outbound SMTP" href="/configuration/transports/smtp/" description="STARTTLS + AUTH PLAIN against any SMTP relay." />
+  <LinkCard title="Webhook" href="/configuration/transports/webhook/" description="Signed JSON POST to your own receiver. (v2.0)" />
 </CardGrid>
 
 ## What every transport guarantees

@@ -1,0 +1,79 @@
+---
+title: Webhook
+description: Deliver a submission as a signed JSON POST instead of an email — the same pipeline, a non-mail sink.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note">Available from **v2.0**.</Aside>
+
+The webhook transport delivers submissions to an HTTP receiver you control instead of a mail provider: a tiny bridge that posts into Slack, a ticketing system, an analytics pipeline. Everything upstream is identical — same ingress shapes, same spam stack, same rate limits, same retry policy — only the sink changes.
+
+```toml
+[[endpoints]]
+path = "/api/contact"
+to = ["ops@example.com"]          # carried in the payload envelope
+from = "Contact <noreply@example.com>"
+subject = "Contact from {{.name}}"
+body = "{{.message}}"
+
+[endpoints.transport]
+type = "webhook"
+
+[endpoints.transport.settings]
+url    = "https://hooks.internal.example/contact-form"
+secret = "${env.CONTACT_HOOK_SECRET}"    # 16+ bytes
+
+[endpoints.transport.settings.headers]   # optional static headers
+X-Team = "infra"
+```
+
+## Settings
+
+| Setting | Required | Description |
+|---|---|---|
+| `url` | yes | Absolute http(s) receiver URL. |
+| `secret` | yes | HMAC-SHA256 signing key, minimum 16 bytes. Never logged. |
+| `headers` | no | Static headers added to every request (receiver auth tokens, routing labels). `Content-Type` and `X-Posthorn-Signature` are reserved and rejected at config load. |
+
+## The payload
+
+Unlike mail transports, the receiver gets the **structured submission**, not just rendered prose:
+
+```json
+{
+  "submission_id": "0d5aa9c8-...",
+  "from": "Contact <noreply@example.com>",
+  "to": ["ops@example.com"],
+  "reply_to": "jane@example.com",
+  "subject": "Contact from Jane",
+  "body_text": "rendered body text",
+  "body_html": "<p>only when body_format = \"html\"</p>",
+  "fields": {
+    "name": ["Jane"],
+    "message": ["the raw submitted values"]
+  }
+}
+```
+
+`fields` carries the raw form/JSON values (structural token fields removed, honeypot redacted); submissions from the SMTP listener have no `fields`. Deduplicate on `submission_id`: with [storage](/features/storage/) enabled, queued retries are at-least-once, and a replayed delivery carries the same ID.
+
+## Verifying the signature
+
+Same scheme as [lifecycle events](/features/lifecycle/#verifying-the-signature): `X-Posthorn-Signature: sha256=<hex>` is the HMAC-SHA256 of the exact request body under your `secret`. One verifier covers both.
+
+## Error classification
+
+| Receiver response | Error class | Retry? |
+|---|---|---|
+| Any `2xx` | (success) | no |
+| `429` | `ErrRateLimited` | yes, after 5s |
+| `5xx` | `ErrTransient` | yes, after 1s |
+| Network timeout / refused | `ErrTransient` | yes, after 1s |
+| Other `4xx` | `ErrTerminal` | no |
+
+With storage enabled, transient exhaustion queues the submission for background retry exactly like mail — a flaky receiver gets the delivery when it recovers.
+
+<Aside type="tip">
+Respond `200` quickly and process async on your side; the 5s request timeout is for acknowledgment, not for your downstream work.
+</Aside>

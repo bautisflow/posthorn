@@ -403,6 +403,7 @@ func (s *session) handleDATA() {
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
 	submissionID := uuid.NewString()
+	msg.SubmissionID = submissionID // FR89; Fields stays nil for SMTP
 
 	// FR86: drop suppressed recipients before the send. All suppressed
 	// → 250 (terminally handled; a 5xx would make the client retry mail
