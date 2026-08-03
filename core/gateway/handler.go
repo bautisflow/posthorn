@@ -77,10 +77,10 @@ type Handler struct {
 	authFailLimiter      *ratelimit.Limiter // nil on form-mode endpoints; per-IP brute-force defense for api-mode 401s
 	idemCache            idempotency.Cacher // nil on form-mode endpoints; Durable when storage attached (FR81)
 	trustedProxies       []netip.Prefix
-	emailField           string        // resolved at construction (cfg.EmailField or default)
-	maxBodySize          int64         // 0 = no cap
-	logFailedSubmissions bool          // resolved at construction (default true)
-	csrfTokenTTL         time.Duration // resolved at construction (cfg.CSRFTokenTTL or default)
+	emailField           string            // resolved at construction (cfg.EmailField or default)
+	maxBodySize          int64             // 0 = no cap
+	logFailedSubmissions bool              // resolved at construction (default true)
+	csrfTokenTTL         time.Duration     // resolved at construction (cfg.CSRFTokenTTL or default)
 	attachPolicy         *attachmentPolicy // nil = attachments not opted in (FR90)
 	logger               *slog.Logger
 	recorder             *metrics.Recorder // nil = no-op (default)
@@ -1503,6 +1503,7 @@ func (h *Handler) vetAttachments(w http.ResponseWriter, r *http.Request, candida
 //     form-mode multi-value fields like `name=a&name=b`).
 //   - Nested objects, top-level non-object bodies, and arrays containing
 //     non-primitives are rejected with a clear error (HTTP 400 via caller).
+//
 // The "attachments" key is structural as of v2.0 (FR90): an array of
 // {filename, content_type, data} objects returned separately, never a
 // template field. Endpoints without the attachments opt-in reject
