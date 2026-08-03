@@ -26,6 +26,16 @@ type Message struct {
 	Subject  string
 	BodyText string
 	BodyHTML string
+
+	// SubmissionID and Fields cross the boundary for structured sinks
+	// (ADR-24 amending ADR-12; FR89). SubmissionID is Posthorn's
+	// submission UUID — set by both ingresses and the retry worker so
+	// at-least-once replays carry a stable dedup key. Fields is the raw
+	// submitted key/values, populated by HTTP ingresses and nil from the
+	// SMTP listener. Mail transports MUST ignore both, and neither may
+	// ever be interpolated into any header at any layer (NFR1).
+	SubmissionID string
+	Fields       map[string][]string
 }
 
 // SendResult is the per-call metadata returned from a successful Send.

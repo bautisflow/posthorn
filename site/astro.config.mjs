@@ -64,6 +64,7 @@ export default defineConfig({
                 { label: 'Mailgun', slug: 'configuration/transports/mailgun' },
                 { label: 'AWS SES', slug: 'configuration/transports/ses' },
                 { label: 'Outbound SMTP', slug: 'configuration/transports/smtp' },
+                { label: 'Webhook', slug: 'configuration/transports/webhook' },
               ],
             },
           ],

@@ -888,11 +888,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	msg := transport.Message{
-		From:     h.cfg.From,
-		To:       toAddresses,
-		Subject:  subject,
-		BodyText: body,
-		BodyHTML: bodyHTML,
+		From:         h.cfg.From,
+		To:           toAddresses,
+		Subject:      subject,
+		BodyText:     body,
+		BodyHTML:     bodyHTML,
+		SubmissionID: submissionID,
+		Fields:       storableFields(r.Form, h.cfg.Honeypot),
 	}
 
 	// Reply-To header (PRD Open Question 4): when the operator names a
@@ -1136,7 +1138,7 @@ func (h *Handler) recordSubmission(id string, msg transport.Message, r *http.Req
 		sub.Subject = msg.Subject
 		sub.BodyText = msg.BodyText
 		sub.BodyHTML = msg.BodyHTML
-		sub.Fields = storableFields(r.Form, h.cfg.Honeypot)
+		sub.Fields = msg.Fields
 		if !h.cfg.StripClientIP {
 			sub.ClientIP = ratelimit.ClientIP(r, h.trustedProxies)
 		}

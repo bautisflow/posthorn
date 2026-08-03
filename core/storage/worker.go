@@ -117,12 +117,14 @@ func (w *Worker) attempt(ctx context.Context, entry DueRetry, hooks Hooks) {
 	)
 
 	msg := transport.Message{
-		From:     entry.From,
-		To:       entry.ToAddrs,
-		ReplyTo:  entry.ReplyTo,
-		Subject:  entry.Subject,
-		BodyText: entry.BodyText,
-		BodyHTML: entry.BodyHTML,
+		From:         entry.From,
+		To:           entry.ToAddrs,
+		ReplyTo:      entry.ReplyTo,
+		Subject:      entry.Subject,
+		BodyText:     entry.BodyText,
+		BodyHTML:     entry.BodyHTML,
+		SubmissionID: entry.ID,
+		Fields:       entry.Fields,
 	}
 
 	res, err := w.Send(ctx, entry.Endpoint, msg)
