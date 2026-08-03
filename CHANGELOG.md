@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+The v2.0 work — the stateful shift, recut 2026-08-02 against the integration-seam USP (unsubscribe injection and fan-out moved out behind demand gates; see the roadmap). Everything below is opt-in: a config without the new blocks behaves identically to v1.2.
+
+### Added
+
+- **HTML email bodies ([#5](https://github.com/craigmccaskill/posthorn/issues/5), ADR-19).** Per-endpoint `body_format = "html"`: the body template renders through `html/template` with contextual auto-escaping, so submitter input is inert markup by construction. Plain-text part auto-derived from the rendered HTML (or supply `text_body`); multipart delivery on all five transports; existing file-based HTML templates work directly via `body = "templates/x.html"`. The SMTP listener now accepts HTML mail — `text/html` maps through, and HTML-only messages (previously rejected `554`) are accepted with a derived text part.
+- **Storage spine ([#21](https://github.com/craigmccaskill/posthorn/issues/21), [#22](https://github.com/craigmccaskill/posthorn/issues/22), ADR-20/21).** Optional `[storage]` block: SQLite (pure-Go driver; static builds unchanged) submission log, sync-first retry queue — 200 still means sent; api-mode callers get `202 {"status":"queued"}` where v1.x dropped mail after inline retries, and queued sends survive restarts with exponential backoff. Durable idempotency (byte-identical replays across restarts). Retention pruning, a hard `max_size` cap so Posthorn can never fill its own disk, and a storage canary in `/healthz` + `posthorn_storage_healthy`; storage failure degrades to v1.x behavior — mail never blocks on the disk.
+- **Lifecycle events + suppression ([#8](https://github.com/craigmccaskill/posthorn/issues/8), [#4](https://github.com/craigmccaskill/posthorn/issues/4), ADR-22/23).** `[lifecycle]` enables a basic-auth-protected Postmark event sink; events normalize to a provider-agnostic shape and forward, HMAC-signed, to per-endpoint `webhook_url`s with retry. Hard bounces and spam complaints auto-suppress globally; suppressed sends answer `200 {"status":"suppressed"}` / SMTP `250` (terminally handled — never retried). Managed via the new `posthorn suppressions list|add|remove` CLI; no HTTP admin API.
+- **Webhook transport ([#23](https://github.com/craigmccaskill/posthorn/issues/23), ADR-24).** `type = "webhook"` delivers the structured submission (id, envelope, bodies, raw fields) as a signed JSON POST — same retry classification and queueing as mail.
+- **File attachments ([#24](https://github.com/craigmccaskill/posthorn/issues/24), ADR-25).** Opt-in `[endpoints.attachments]` with a required `allowed_types` allowlist enforced on the sniffed bytes, never the declared type. Form-mode multipart files and api-mode base64 `attachments`; carried by all five mail transports.
+- New metrics: queue counters/gauges, lifecycle event/forward counters, `posthorn_suppressed_recipients_total`.
+
+### Fixed
+
+- Multipart form **fields** were silently dropped in v1.x — `multipart/form-data` submissions never delivered their values to validation, spam checks, or templates. Form parsing is now content-type-aware.
+
+### Security
+
+- Doctrine, spec-level (NFR25): security-relevant features are opt-in, never default-on. The lifecycle event endpoint cannot run unauthenticated; attachments require an explicit type allowlist; storage requires an explicit block.
 
 ## [1.2.0] — 2026-07-04
 
