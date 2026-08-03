@@ -84,6 +84,13 @@ const (
 	AuthAPIKey = "api-key"
 )
 
+// Body format values for EndpointConfig.BodyFormat. Empty / unset is
+// equivalent to BodyFormatText (FR71 — v1.x configs unchanged).
+const (
+	BodyFormatText = "text"
+	BodyFormatHTML = "html"
+)
+
 // EndpointConfig configures one ingress endpoint. Multiple endpoints in one
 // Config are independent — no shared rate-limit budget, no cross-endpoint
 // state (FR2).
@@ -108,6 +115,17 @@ type EndpointConfig struct {
 	ReplyToEmailField    string           `toml:"reply_to_email_field"`
 	Subject              string           `toml:"subject"`
 	Body                 string           `toml:"body"`
+
+	// v2.0 block E: HTML body (FR71, FR72, ADR-19). BodyFormat selects
+	// how Body renders: "text" (default; v1.x behavior) or "html", which
+	// renders through html/template with contextual auto-escaping —
+	// submitter values are inert markup by construction. TextBody is an
+	// optional explicit plain-text template for the multipart fallback
+	// part; when unset, the text part is auto-derived from the rendered
+	// HTML. TextBody without BodyFormat = "html" is a parse error.
+	BodyFormat string `toml:"body_format"`
+	TextBody   string `toml:"text_body"`
+
 	LogFailedSubmissions *bool            `toml:"log_failed_submissions"`
 	RedirectSuccess      string           `toml:"redirect_success"`
 	RedirectError        string           `toml:"redirect_error"`
@@ -568,6 +586,19 @@ func (e *EndpointConfig) Validate() error {
 	}
 	if e.Body == "" {
 		return errors.New("body is required")
+	}
+
+	// FR71/FR72: body_format enum and the text_body pairing rule. An
+	// explicit fallback template on a text endpoint is a config the
+	// operator misunderstands — reject loudly rather than ignore.
+	switch e.BodyFormat {
+	case "", BodyFormatText, BodyFormatHTML:
+		// valid
+	default:
+		return fmt.Errorf("body_format: must be %q or %q, got %q", BodyFormatText, BodyFormatHTML, e.BodyFormat)
+	}
+	if e.TextBody != "" && e.BodyFormat != BodyFormatHTML {
+		return errors.New("text_body: only valid when body_format = \"html\" (text endpoints render body directly; there is no fallback part)")
 	}
 
 	if err := e.Transport.Validate(); err != nil {

@@ -664,7 +664,7 @@ These do not block the brief but need answers during implementation. None should
 
 1. **Logging library: `log/slog` (stdlib) or `zap`?** `slog` is stdlib, no dep, structured logging native. Recommendation: `slog`. Decided during Story 4.2.
 
-2. **Body template — file path vs inline detection.** Recommendation: heuristic — if the value contains `{{` it's inline; otherwise it's a file path. Reject ambiguity at validation time. Decided during Story 2.4.
+2. **Body template — file path vs inline detection.** Recommendation: heuristic — if the value contains `{{` it's inline; otherwise it's a file path. Reject ambiguity at validation time. Decided during Story 2.4. v2.0 extension: markup-shaped values (containing `<` and `>`) are inline (Story 13.1; static HTML bodies contain `/` in closing tags).
 
 3. **Reply-To handling.** When the form has an email field, set the email's `Reply-To` to that address by default? Recommendation: yes, configurable via `reply_to_email_field <fieldname>` (default: the email field). Decided during Story 2.4.
 

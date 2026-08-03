@@ -779,7 +779,7 @@ These are implementation decisions deferred from the brief and PRD that affect c
 
 2. **`trusted_proxies` syntax in v1.0.** Decision: CIDR-only. Named presets (`cloudflare`, etc.) are planned for v1.2 (see brief §"Post-MVP Vision"). Confirmed during Story 3.2.
 
-3. **Body template — file path vs inline detection.** Recommendation: heuristic — if the value contains `{{` it's inline; otherwise it's a file path. Reject ambiguity at validation time. Decided during Story 2.4.
+3. **Body template — file path vs inline detection.** Recommendation: heuristic — if the value contains `{{` it's inline; otherwise it's a file path. Reject ambiguity at validation time. Decided during Story 2.4. **v2.0 extension (Story 13.1):** markup-shaped values (containing both `<` and `>`) are also inline — static HTML bodies have no template vars but their closing tags contain `/`, and no real filesystem path is markup-shaped.
 
 4. **Response body for 502 terminal failures.** Recommendation: 502 response body says "Submission could not be delivered. Please try again later." with no detail. Detail is in the operator's logs. Avoiding leaking whether the failure was config (4xx from upstream) vs runtime (network) to a potential attacker. Decided during Story 4.1.
 
