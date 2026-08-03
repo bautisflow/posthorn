@@ -29,6 +29,7 @@ import (
 	"github.com/craigmccaskill/posthorn/config"
 	"github.com/craigmccaskill/posthorn/gateway"
 	"github.com/craigmccaskill/posthorn/ingress"
+	"github.com/craigmccaskill/posthorn/lifecycle"
 	"github.com/craigmccaskill/posthorn/metrics"
 	"github.com/craigmccaskill/posthorn/smtp"
 	"github.com/craigmccaskill/posthorn/spam"
@@ -43,8 +44,9 @@ var version = "v0.0.1-dev"
 const usage = `posthorn — the unified outbound mail layer for self-hosted projects.
 
 Usage:
-  posthorn serve     [--config <path>] [--listen <addr>]
-  posthorn validate  [--config <path>]
+  posthorn serve         [--config <path>] [--listen <addr>]
+  posthorn validate      [--config <path>]
+  posthorn suppressions  <list | add <email> [--reason <r>] | remove <email>> [--config <path>]
   posthorn version
   posthorn help
 
@@ -54,6 +56,9 @@ Default listen addr:  :8080
 Examples:
   posthorn serve --config ./posthorn.toml --listen :8080
   posthorn validate --config ./posthorn.toml
+  posthorn suppressions list --config ./posthorn.toml
+  posthorn suppressions add bounced@example.com --config ./posthorn.toml
+  posthorn suppressions remove bounced@example.com --config ./posthorn.toml
 `
 
 func main() {
@@ -73,6 +78,11 @@ func main() {
 		}
 	case "validate":
 		if err := runValidate(args); err != nil {
+			fmt.Fprintln(os.Stderr, "posthorn:", err)
+			os.Exit(1)
+		}
+	case "suppressions":
+		if err := runSuppressions(args); err != nil {
 			fmt.Fprintln(os.Stderr, "posthorn:", err)
 			os.Exit(1)
 		}
@@ -215,6 +225,31 @@ func runServe(args []string) error {
 			OnHealth: recorder.SetStorageHealthy,
 			OnDepth:  recorder.SetQueueDepth,
 		})
+
+		// v2.0: lifecycle event ingestion + callback forwarding (FR82-FR85).
+		if cfg.Lifecycle != nil {
+			webhooks := map[string]lifecycle.Webhook{}
+			for _, ep := range cfg.Endpoints {
+				if ep.WebhookURL != "" {
+					webhooks[ep.Path] = lifecycle.Webhook{URL: ep.WebhookURL, Secret: ep.WebhookSecret}
+				}
+			}
+			fwd := &lifecycle.Forwarder{
+				Webhooks: webhooks,
+				Gate:     gate,
+				Logger:   logger,
+				OnResult: recorder.LifecycleForward,
+			}
+			eventsHandler, err := lifecycle.NewHandler(
+				cfg.Lifecycle.BasicAuthUsername, cfg.Lifecycle.BasicAuthPassword,
+				gate, fwd, logger, recorder)
+			if err != nil {
+				return fmt.Errorf("build lifecycle handler: %w", err)
+			}
+			mux.Handle("/events/postmark", eventsHandler)
+			go fwd.RunQueue(ctx, 0)
+			logger.Info("lifecycle_enabled", slog.Int("webhook_endpoints", len(webhooks)))
+		}
 	}
 
 	return runIngressesUntilSignal(ingresses, logger)

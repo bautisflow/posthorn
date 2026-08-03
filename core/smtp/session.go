@@ -404,6 +404,25 @@ func (s *session) handleDATA() {
 	defer cancel()
 	submissionID := uuid.NewString()
 
+	// FR86: drop suppressed recipients before the send. All suppressed
+	// → 250 (terminally handled; a 5xx would make the client retry mail
+	// that must never send) with nothing delivered.
+	var suppressedCount int
+	msg.To, suppressedCount = s.filterSuppressed(msg.To)
+	if suppressedCount > 0 && s.l.recorder != nil {
+		s.l.recorder.Suppressed(smtpEndpointLabel, suppressedCount)
+	}
+	if len(msg.To) == 0 {
+		s.recordSuppressed(submissionID, msg)
+		_ = s.writeReply(250, "2.1.5 OK suppressed as "+submissionID)
+		s.logger.Info("smtp_submission_suppressed",
+			slog.String("submission_id", submissionID),
+			slog.Int("recipients", suppressedCount),
+		)
+		s.resetTransaction()
+		return
+	}
+
 	// FR77: persist pre-send (status "sending") so a crash mid-send is
 	// recoverable (NFR28). Best-effort; degraded storage never blocks.
 	persisted, queueable := s.recordSubmission(submissionID, msg)
@@ -497,6 +516,51 @@ func (s *session) recordSubmission(id string, msg transport.Message) (persisted,
 // submission log — the SMTP listener has no HTTP path. Matches the
 // constant in cmd/posthorn's worker transport map.
 const smtpEndpointLabel = "smtp_listener"
+
+// filterSuppressed drops suppressed recipients (FR86). Without storage
+// (or degraded) everything passes — v1.x untouched; lookup errors fail
+// open per-recipient (mail first, NFR27).
+func (s *session) filterSuppressed(to []string) (remaining []string, suppressed int) {
+	g := s.l.gate
+	if g == nil || !g.Healthy() {
+		return to, 0
+	}
+	remaining = make([]string, 0, len(to))
+	for _, addr := range to {
+		_, ok, err := g.Store().SuppressionFor(addr)
+		if err != nil {
+			g.ReportError(err)
+			remaining = append(remaining, addr)
+			continue
+		}
+		if ok {
+			suppressed++
+			continue
+		}
+		remaining = append(remaining, addr)
+	}
+	return remaining, suppressed
+}
+
+// recordSuppressed logs an all-recipients-suppressed submission.
+func (s *session) recordSuppressed(id string, msg transport.Message) {
+	g := s.l.gate
+	if g == nil || !g.Healthy() {
+		return
+	}
+	err := g.Store().RecordSubmission(storage.Submission{
+		ID:        id,
+		Endpoint:  smtpEndpointLabel,
+		Transport: s.l.cfg.Transport.Type,
+		From:      msg.From,
+		Subject:   msg.Subject,
+		Status:    storage.StatusSuppressed,
+		CreatedAt: time.Now(),
+	})
+	if err != nil {
+		g.ReportError(err)
+	}
+}
 
 func (s *session) recordSendOk(latency time.Duration) {
 	if s.l.recorder == nil {
