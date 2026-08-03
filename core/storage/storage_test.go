@@ -337,4 +337,3 @@ func TestMaxSize_CapsGrowthButStaysOperable(t *testing.T) {
 		t.Fatalf("insert after prune: %v", err)
 	}
 }
-
