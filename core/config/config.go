@@ -101,20 +101,20 @@ const (
 //   - API-key mode (v1.1): server-to-server callers POST JSON bodies with
 //     Authorization: Bearer <key>; browser defenses do not apply (FR31, FR32).
 type EndpointConfig struct {
-	Path                 string           `toml:"path"`
-	To                   []string         `toml:"to"`
-	From                 string           `toml:"from"`
-	Transport            TransportConfig  `toml:"transport"`
-	RateLimit            *RateLimitConfig `toml:"rate_limit"`
-	TrustedProxies       []string         `toml:"trusted_proxies"`
-	Honeypot             string           `toml:"honeypot"`
-	AllowedOrigins       []string         `toml:"allowed_origins"`
-	MaxBodySize          string           `toml:"max_body_size"` // e.g. "32KB"; parsed at handler-construction time
-	Required             []string         `toml:"required"`
-	EmailField           string           `toml:"email_field"`
-	ReplyToEmailField    string           `toml:"reply_to_email_field"`
-	Subject              string           `toml:"subject"`
-	Body                 string           `toml:"body"`
+	Path              string           `toml:"path"`
+	To                []string         `toml:"to"`
+	From              string           `toml:"from"`
+	Transport         TransportConfig  `toml:"transport"`
+	RateLimit         *RateLimitConfig `toml:"rate_limit"`
+	TrustedProxies    []string         `toml:"trusted_proxies"`
+	Honeypot          string           `toml:"honeypot"`
+	AllowedOrigins    []string         `toml:"allowed_origins"`
+	MaxBodySize       string           `toml:"max_body_size"` // e.g. "32KB"; parsed at handler-construction time
+	Required          []string         `toml:"required"`
+	EmailField        string           `toml:"email_field"`
+	ReplyToEmailField string           `toml:"reply_to_email_field"`
+	Subject           string           `toml:"subject"`
+	Body              string           `toml:"body"`
 
 	// v2.0 block E: HTML body (FR71, FR72, ADR-19). BodyFormat selects
 	// how Body renders: "text" (default; v1.x behavior) or "html", which
@@ -126,9 +126,9 @@ type EndpointConfig struct {
 	BodyFormat string `toml:"body_format"`
 	TextBody   string `toml:"text_body"`
 
-	LogFailedSubmissions *bool            `toml:"log_failed_submissions"`
-	RedirectSuccess      string           `toml:"redirect_success"`
-	RedirectError        string           `toml:"redirect_error"`
+	LogFailedSubmissions *bool  `toml:"log_failed_submissions"`
+	RedirectSuccess      string `toml:"redirect_success"`
+	RedirectError        string `toml:"redirect_error"`
 
 	// v1.1: API mode. Auth selects the endpoint shape; empty defaults to
 	// AuthForm preserving v1.0 behavior (FR31, FR45). APIKeys is the list

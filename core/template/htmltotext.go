@@ -147,7 +147,7 @@ func parseTag(src string, i int) (name, attrs string, closing bool, next int) {
 	// for doctype/CDATA) after '<'; anything else means the '<' is
 	// literal text, not markup. Without this, "1 < 2" would swallow
 	// everything up to the next unrelated '>'.
-	if j >= n || !(src[j] >= 'a' && src[j] <= 'z' || src[j] >= 'A' && src[j] <= 'Z' || src[j] == '!') {
+	if j >= n || !isTagStart(src[j]) {
 		return "", "", false, -1
 	}
 	nameStart := j
@@ -171,6 +171,10 @@ func parseTag(src string, i int) (name, attrs string, closing bool, next int) {
 		j++
 	}
 	return "", "", false, -1
+}
+
+func isTagStart(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '!'
 }
 
 func isAlnum(c byte) bool {
