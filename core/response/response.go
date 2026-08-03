@@ -36,6 +36,15 @@ type Error struct {
 type Success struct {
 	Status       string `json:"status"`
 	SubmissionID string `json:"submission_id"`
+
+	// Suppressed lists recipients removed from this send by the
+	// suppression list, keyed by address with the suppression reason as
+	// the value (FR86, v2.0). Empty on sends with no suppressed
+	// recipients — including every send on a storage-less deployment —
+	// so v1.x response bodies are byte-identical. When Status is
+	// "suppressed", every recipient was on the list and nothing was
+	// sent; 2xx still means terminally handled — do not retry.
+	Suppressed map[string]string `json:"suppressed,omitempty"`
 }
 
 // DryRun is the JSON envelope returned on 200 when the endpoint has

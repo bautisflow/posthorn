@@ -931,6 +931,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// FR86: drop suppressed recipients before the send. All suppressed →
+	// terminally handled as "suppressed", nothing sent. Lookup failures
+	// fail open (send anyway) — mail first, NFR27.
+	var suppressed map[string]string
+	msg.To, suppressed = h.filterSuppressed(msg.To)
+	if len(suppressed) > 0 {
+		h.recorder.Suppressed(h.cfg.Path, len(suppressed))
+		logger.Info("recipients_suppressed", slog.Int("count", len(suppressed)))
+	}
+	if len(msg.To) == 0 {
+		h.recordSuppressedSubmission(submissionID, msg, r)
+		logger.Info("submission_suppressed",
+			slog.Int64("latency_ms", time.Since(start).Milliseconds()),
+		)
+		h.writeSuccessResponse(w, r, response.Success{
+			Status:       "suppressed",
+			SubmissionID: submissionID,
+			Suppressed:   suppressed,
+		})
+		return
+	}
+
 	// FR77: persist the submission (status "sending") before the send so
 	// a crash mid-send is recoverable (NFR28). Best-effort: a storage
 	// failure degrades, never blocks (NFR27).
@@ -1012,7 +1034,65 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.writeSuccessResponse(w, r, response.Success{
 		Status:       "ok",
 		SubmissionID: submissionID,
+		Suppressed:   suppressed,
 	})
+}
+
+// filterSuppressed splits recipients into sendable and suppressed
+// (FR86). Without storage, or degraded, everything is sendable — the
+// v1.x path untouched. Lookup errors fail open per-recipient.
+func (h *Handler) filterSuppressed(to []string) (remaining []string, suppressed map[string]string) {
+	g := h.storageGate
+	if g == nil || !g.Healthy() {
+		return to, nil
+	}
+	remaining = make([]string, 0, len(to))
+	for _, addr := range to {
+		sup, ok, err := g.Store().SuppressionFor(addr)
+		if err != nil {
+			g.ReportError(err)
+			remaining = append(remaining, addr)
+			continue
+		}
+		if ok {
+			if suppressed == nil {
+				suppressed = map[string]string{}
+			}
+			suppressed[addr] = sup.Reason
+			continue
+		}
+		remaining = append(remaining, addr)
+	}
+	return remaining, suppressed
+}
+
+// recordSuppressedSubmission logs an all-recipients-suppressed
+// submission (status "suppressed", FR86) in the submission log.
+func (h *Handler) recordSuppressedSubmission(id string, msg transport.Message, r *http.Request) {
+	g := h.storageGate
+	if g == nil || !g.Healthy() {
+		return
+	}
+	sub := storage.Submission{
+		ID:        id,
+		Endpoint:  h.cfg.Path,
+		Transport: h.cfg.Transport.Type,
+		Status:    storage.StatusSuppressed,
+		CreatedAt: time.Now(),
+	}
+	if h.logFailedSubmissions {
+		sub.From = msg.From
+		sub.Subject = msg.Subject
+		sub.BodyText = msg.BodyText
+		sub.BodyHTML = msg.BodyHTML
+		sub.Fields = storableFields(r.Form, h.cfg.Honeypot)
+		if !h.cfg.StripClientIP {
+			sub.ClientIP = ratelimit.ClientIP(r, h.trustedProxies)
+		}
+	}
+	if err := g.Store().RecordSubmission(sub); err != nil {
+		g.ReportError(err)
+	}
 }
 
 // AttachStorage wires the optional storage gate (FR76). Called by

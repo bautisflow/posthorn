@@ -132,6 +132,63 @@ func TestSMTP_Storage_TerminalFailure_451AndFailedRow(t *testing.T) {
 	}
 }
 
+func TestSMTP_Suppression_AllSuppressed_250NoSend(t *testing.T) {
+	f := startListener(t, baseTestConfig())
+	gate := attachTestGate(t, f)
+	if err := gate.Store().AddSuppression("alice@somewhere.com", storage.ReasonHardBounce, "/x", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	code, msg := deliverBasic(t, f)
+	if code != 250 {
+		t.Fatalf("DATA reply = %d %q — suppressed mail answers 250 so the client never retries", code, msg)
+	}
+	if !strings.Contains(msg, "suppressed") {
+		t.Errorf("reply = %q", msg)
+	}
+	if got := f.mt.Sent(); len(got) != 0 {
+		t.Fatalf("suppressed submission sent mail: %d", len(got))
+	}
+	subs, _ := gate.Store().ListSubmissions(10)
+	if len(subs) != 1 || subs[0].Status != storage.StatusSuppressed {
+		t.Fatalf("row = %+v", subs)
+	}
+}
+
+func TestSMTP_Suppression_Mixed_SendsRemainder(t *testing.T) {
+	f := startListener(t, baseTestConfig())
+	gate := attachTestGate(t, f)
+	if err := gate.Store().AddSuppression("bounced@somewhere.com", storage.ReasonSpamComplaint, "/x", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	tp := f.dial()
+	_ = tp.PrintfLine("EHLO client.test")
+	expectMultiline(t, tp, 250)
+	_ = tp.PrintfLine("AUTH PLAIN %s", authPlainCreds("user", "pass"))
+	expect(t, tp, 235)
+	_ = tp.PrintfLine("MAIL FROM:<noreply@example.com>")
+	expect(t, tp, 250)
+	_ = tp.PrintfLine("RCPT TO:<alice@somewhere.com>")
+	expect(t, tp, 250)
+	_ = tp.PrintfLine("RCPT TO:<bounced@somewhere.com>")
+	expect(t, tp, 250)
+	_ = tp.PrintfLine("DATA")
+	expect(t, tp, 354)
+	_ = tp.PrintfLine("From: noreply@example.com\r\nSubject: Hello\r\n\r\nBody text.\r\n.")
+	expect(t, tp, 250)
+	_ = tp.PrintfLine("QUIT")
+
+	waitForSend(t, f.mt, 1, 500*time.Millisecond)
+	sent := f.mt.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("sends = %d", len(sent))
+	}
+	if len(sent[0].To) != 1 || sent[0].To[0] != "alice@somewhere.com" {
+		t.Errorf("To = %v, want only the clean recipient", sent[0].To)
+	}
+}
+
 func TestSMTP_Storage_Degraded_V1Behavior(t *testing.T) {
 	shortRetryDelays(t)
 	f := startListener(t, baseTestConfig())

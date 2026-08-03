@@ -1,0 +1,100 @@
+---
+title: Lifecycle events & suppression
+description: Delivery and bounce callbacks forwarded to your apps, and automatic suppression of dead addresses.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note">Available from **v2.0**. Requires a [`[storage]` block](/features/storage/) — events are correlated against the submission log.</Aside>
+
+Without lifecycle events, delivery outcomes are invisible to your apps: Posthorn hands mail to your provider and the story ends. If a license email hard-bounces, the app that sent it never learns, and the next send to the same dead address dings your provider reputation again.
+
+The `[lifecycle]` block closes that loop for **Postmark**: Posthorn receives Postmark's webhooks, normalizes them, auto-suppresses dead addresses, and forwards events to the app that originated the mail.
+
+## Setup
+
+```toml
+[lifecycle]
+basic_auth_username = "postmark"
+basic_auth_password = "${env.POSTHORN_EVENTS_PASSWORD}"
+
+[[endpoints]]
+path = "/license-delivery"
+auth = "api-key"
+# ... endpoint config ...
+webhook_url    = "https://api.your-app.example/email-events"
+webhook_secret = "${env.YOUR_APP_WEBHOOK_SECRET}"   # 16+ bytes
+```
+
+Then point Postmark at Posthorn: in your Postmark server's settings, add a webhook to `https://your-posthorn.example/events/postmark` with the basic-auth credentials, and enable the event types you care about (Delivery, Bounce, Spam Complaint).
+
+<Aside type="caution">
+This is Posthorn's first endpoint a third party POSTs to, so it requires your Posthorn instance to be **reachable by Postmark's webhook senders**. Deliberately-internal deployments (homelab behind Tailscale, no inbound exposure) keep everything else in v2.0 — the retry queue, the suppression list via CLI — but can't receive events. Basic auth is mandatory and fail-closed: there is no way to run the endpoint open.
+</Aside>
+
+## The normalized event
+
+Your app receives one JSON shape regardless of provider dialect:
+
+```json
+{
+  "event": "hard_bounce",
+  "submission_id": "0d5aa9c8-...",
+  "endpoint": "/license-delivery",
+  "recipient": "customer@example.com",
+  "timestamp": "2026-08-02T10:00:00Z",
+  "provider": "postmark",
+  "provider_data": { "...": "raw Postmark payload" }
+}
+```
+
+`event` is one of `delivered`, `hard_bounce`, `soft_bounce`, `spam_complaint`, `opened`, `clicked`, `other`. `submission_id` matches the ID Posthorn returned when your app sent the mail — that's your join key.
+
+The normalized fields are the contract. `provider_data` carries the raw provider payload as a convenience; it changes when providers change, so don't build on it.
+
+## Verifying the signature
+
+Every forwarded event is signed. The `X-Posthorn-Signature` header carries `sha256=<hex>` — the HMAC-SHA256 of the exact request body under your `webhook_secret`:
+
+```go
+mac := hmac.New(sha256.New, []byte(secret))
+mac.Write(body)
+want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+ok := hmac.Equal([]byte(r.Header.Get("X-Posthorn-Signature")), []byte(want))
+```
+
+Respond `2xx` to acknowledge. On `5xx` or timeout, Posthorn retries with backoff (1m, 4m, 16m, ~1h, ~4h) and gives up after five attempts; on other `4xx` it drops the event immediately.
+
+## Automatic suppression
+
+Hard bounces and spam complaints add the address to a global suppression list automatically. Future sends to a suppressed address — through **any** endpoint or the SMTP listener — skip that recipient:
+
+- If every recipient is suppressed, HTTP callers get `200 {"status": "suppressed", "suppressed": {"addr": "reason"}}` — a 2xx because the request is terminally handled; retrying will never send it. SMTP clients get `250`.
+- Mixed recipient lists send to the clean addresses; the response's `suppressed` map names what was skipped.
+
+This protects your provider account: providers deactivate senders that keep mailing known-dead addresses. Soft bounces (full mailbox, greylisting) never suppress.
+
+## Managing the list
+
+Suppressions are managed from the CLI, not an HTTP API:
+
+```bash
+posthorn suppressions list --config ./posthorn.toml
+posthorn suppressions add spam-trap@example.com --config ./posthorn.toml
+posthorn suppressions remove recovered@example.com --config ./posthorn.toml
+```
+
+`remove` clears every entry for the address — also your GDPR-erasure path, since suppression rows are deliberately exempt from [retention pruning](/features/storage/) (forgetting a bounce would defeat the feature). The storage file is standard SQLite, so `sqlite3 posthorn.db 'SELECT * FROM suppressions'` works too.
+
+## Provider support
+
+v2.0 ingests **Postmark** events only. The normalized shape is provider-agnostic by design; other providers (Resend, Mailgun, SES-via-SNS) slot in behind it when demand shows up — [open an issue](https://github.com/craigmccaskill/posthorn/issues) with your provider and use case. Mail *sending* is unaffected: all five transports work with or without lifecycle.
+
+## Metrics
+
+| Metric | Meaning |
+|---|---|
+| `posthorn_lifecycle_events_total{event}` | Accepted, normalized events |
+| `posthorn_lifecycle_dropped_total{reason}` | Posts dropped (`unmatched` / `malformed`) |
+| `posthorn_lifecycle_forwards_total{endpoint,outcome}` | Callback deliveries (`sent` / `queued` / `dropped`) |
+| `posthorn_suppressed_recipients_total{endpoint}` | Recipients skipped by the suppression list |
