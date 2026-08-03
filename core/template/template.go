@@ -42,9 +42,9 @@ import (
 // plus a plain-text fallback part per FR72).
 type Renderer struct {
 	subject     *template.Template
-	body        *template.Template          // text mode
-	htmlBody    *htmltemplate.Template      // html mode
-	textBody    *template.Template          // html mode: optional explicit fallback
+	body        *template.Template     // text mode
+	htmlBody    *htmltemplate.Template // html mode
+	textBody    *template.Template     // html mode: optional explicit fallback
 	namedFields map[string]bool
 }
 

@@ -58,13 +58,13 @@ func runSuppressions(args []string) error {
 			return nil
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "EMAIL\tREASON\tSOURCE\tSINCE")
+		_, _ = fmt.Fprintln(w, "EMAIL\tREASON\tSOURCE\tSINCE")
 		for _, r := range rows {
 			src := r.SourceEndpoint
 			if src == "" {
 				src = "-"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.Email, r.Reason, src, r.CreatedAt.Format(time.RFC3339))
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.Email, r.Reason, src, r.CreatedAt.Format(time.RFC3339))
 		}
 		return w.Flush()
 

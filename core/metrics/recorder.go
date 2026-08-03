@@ -30,12 +30,12 @@ type Recorder struct {
 	sendLatency      *Histogram
 
 	// v2.0 storage surface (FR78, FR80).
-	queued           *Counter
-	queueSent        *Counter
-	queueRetried     *Counter
-	queueDeadLetter  *Counter
-	storageHealthy   *Gauge
-	retryQueueDepth  *Gauge
+	queued          *Counter
+	queueSent       *Counter
+	queueRetried    *Counter
+	queueDeadLetter *Counter
+	storageHealthy  *Gauge
+	retryQueueDepth *Gauge
 
 	// v2.0 lifecycle + suppression surface (FR82-FR86). Label values
 	// are fixed enums / endpoint paths only (NFR30).
