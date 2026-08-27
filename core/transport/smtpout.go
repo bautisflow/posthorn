@@ -478,8 +478,8 @@ func validateSMTPOutSettings(settings map[string]any) error {
 	}
 	if helloHostnameRaw, exists := settings["hello_hostname"]; exists {
 		helloHostname, ok := helloHostnameRaw.(string)
-		if !ok || strings.TrimSpace(helloHostname) == "" || strings.ContainsAny(helloHostname, "\r\n") {
-			return fmt.Errorf("smtp transport settings.hello_hostname must be a non-empty string without CR or LF")
+		if !ok || helloHostname == "" || strings.ContainsAny(helloHostname, " \t\r\n\v\f") {
+			return fmt.Errorf("smtp transport settings.hello_hostname must be a non-empty string with no whitespace")
 		}
 	}
 	return nil

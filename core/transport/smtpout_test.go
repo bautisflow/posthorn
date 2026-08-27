@@ -658,6 +658,8 @@ func TestSMTPOut_RegisteredAtPackageLoad(t *testing.T) {
 		{"empty_hello_hostname", map[string]any{"host": "h", "port": 587, "username": "u", "password": "p", "hello_hostname": ""}, true},
 		{"non_string_hello_hostname", map[string]any{"host": "h", "port": 587, "username": "u", "password": "p", "hello_hostname": 123}, true},
 		{"crlf_hello_hostname", map[string]any{"host": "h", "port": 587, "username": "u", "password": "p", "hello_hostname": "mail.example.com\r\nX-INJECTED"}, true},
+		{"trailing_space_hello_hostname", map[string]any{"host": "h", "port": 587, "username": "u", "password": "p", "hello_hostname": "mail.example.com "}, true},
+		{"internal_space_hello_hostname", map[string]any{"host": "h", "port": 587, "username": "u", "password": "p", "hello_hostname": "mail example.com"}, true},
 		{"valid_int_port", map[string]any{"host": "h", "port": 587, "username": "u", "password": "p"}, false},
 		{"valid_int64_port", map[string]any{"host": "h", "port": int64(587), "username": "u", "password": "p"}, false},
 		{"valid_hello_hostname", map[string]any{"host": "h", "port": 587, "username": "u", "password": "p", "hello_hostname": "mail.example.com"}, false},
